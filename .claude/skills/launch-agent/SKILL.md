@@ -12,15 +12,7 @@ description: >
 
 ## Использование
 
-Когда пользователь просит запустить агента в новом окне, создай команду для PowerShell.
-
-## Доступные роли
-
-- `architect` — Архитектор
-- `techlead` — Технический лидер
-- `analyst` — Аналитик
-- `developer` — Разработчик
-- `reviewer` — Ревьюер
+Когда пользователь просит запустить агента в новом окне, выполни команду для PowerShell.
 
 ## Формат команды
 
@@ -33,7 +25,7 @@ powershell -Command "Start-Process cmd -ArgumentList '/k', 'cd /d D:\_workspace\
 - Пробелы внутри промпта работают корректно
 - Окно останется открытым (`/k`)
 
-## Промпты для разных ролей
+## Промпты для разных ролей (примеры, фактические промпты формируются из контекста диалога)
 
 ### Architect
 
@@ -124,13 +116,11 @@ powershell -Command "Start-Process cmd -ArgumentList '/k', 'cd /d D:\_workspace\
 ## Пример использования
 
 **Запрос пользователя:**
-> Запусти мне архитектора в новом окне
+> Запусти работу архитектора 
 
 **Ответ:**
-Вот команда для запуска Architect в новом окне:
-
+> Команда в терминале (выполняешь ты сам):
 ```powershell
 powershell -Command "Start-Process cmd -ArgumentList '/k', 'cd /d D:\_workspace\team-assistant && claude \"Ты — агент Architect (см. .agents/architect.md). Прочитай: .agents/architect.md, AGENTS.md, Все файлы из 00_docs/standards/common/, Все файлы из 00_docs/standards/architect/, 00_docs/architecture/overview.md. Задача: Продолжи работу над архитектурой проекта. Обсуди со мной дальнейшие шаги.\"'"
 ```
 
-Скопируйте и выполните эту команду в PowerShell или командной строке.
