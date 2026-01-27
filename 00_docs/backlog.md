@@ -10,10 +10,10 @@
 
 | ID | Название | Приоритет | Статус | Дата начала | Дата завершения | Зависимости |
 |----|----------|-----------|--------|-------------|-----------------|-------------|
-| 001 | Base utilities (PDF Renderer, OCR нормализация, State Manager) | High | Не начата | - | - | Нет |
-| 002 | VLM processing (VLM Client, VLM Agent, DocumentProcessor) | High | Не начата | - | - | Задача 001 |
-| 003 | OCR support (OCR Client, OCR Tool) | Medium | Не начата | - | - | Задача 001 |
-| 004 | High-level operations (FullDescriptionOperation) | High | Не начата | - | - | Задача 002 |
+| 001 | Base utilities (PDF Renderer, OCR нормализация, State Manager) | High | Выполнена | 2025-01-27 | 2025-01-27 | Нет |
+| 002 | VLM processing (VLM Client, VLM Agent, DocumentProcessor) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
+| 003 | OCR support (OCR Client, OCR Tool) | Medium | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
+| 004 | High-level operations (FullDescriptionOperation) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 002 |
 
 ---
 

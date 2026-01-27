@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(git ls-remote:*)",
-      "Bash(git clone:*)"
+      "Bash(git clone:*)",
+      "Bash(venv/Scripts/pip:*)",
+      "Bash(test:*)",
+      "Bash(python:*)",
+      "Bash(PYTHONPATH=\"D:\\\\_storage_cbr\\\\020_docs_vision\\\\08_vlm-ocr-doc-reader\\\\02_src\" python:*)",
+      "Bash(venv/Scripts/pytest:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(PYTHONPATH=\"D:\\\\_storage_cbr\\\\020_docs_vision\\\\08_vlm-ocr-doc-reader\\\\02_src\" python -c \"from vlm_ocr_doc_reader.utils.normalization import normalize_ocr_digits; print\\(repr\\(normalize_ocr_digits\\(''ABC''\\)\\)\\)\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
