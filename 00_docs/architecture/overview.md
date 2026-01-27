@@ -142,6 +142,26 @@ vlm_ocr_doc_reader/
 
 ### 3.1. Operations Organization
 
+**⚠️ ВАЖНО: Правильный подход к работе с operations**
+
+**Никаких** методов вида `processor.full_description()`, `processor.cluster()`, etc.!
+
+**Только** подход через импорт и вызов `.execute()`:
+
+```python
+from vlm_ocr_doc_reader.operations import TriageOperation, ClusteringOperation, FullDescriptionOperation
+
+# Операции импортируются как классы
+triage = TriageOperation(processor)
+cluster = ClusteringOperation(processor)
+full_desc = FullDescriptionOperation(processor)
+
+# Вызов через .execute()
+result = triage.execute(prompt="найди страницы с таблицами")
+result = cluster.execute(prompt="сгруппируй по смыслу")
+result = full_desc.execute()
+```
+
 **Принятый подход:** Operations импортируются как самостоятельные классы, при создании получают экземпляр процессора
 
 ```python
@@ -193,6 +213,104 @@ result = triage.execute(prompt="...")
 - **P1:** `ClusteringOperation` - кластеризация страниц
 - **P2:** `TriageOperation`, `ExtractionOperation` - расширенная функциональность
 
+### 3.5. Входные данные DocumentProcessor
+
+**Поддерживаемые форматы:**
+- **PDF файл** - автоматически рендерится в PNG через preprocessing/renderer.py
+- **Массив PNG** - готовые страницы, используются как есть
+
+**Логика:**
+```python
+# PDF - автоматический рендеринг
+processor = DocumentProcessor(source="report.pdf")
+# → внутренне вызывает renderer: PDF → [PNG, PNG, ...]
+
+# Массив PNG - используется как есть
+processor = DocumentProcessor(source=[page1_png, page2_png, ...])
+```
+
+**⚠️ Важно:** DPI для рендеринга PDF настраивается иерархически (см. 3.7)
+
+### 3.6. Auto-save и State Management (детали)
+
+**Гибридный подход к автосохранению:**
+
+```python
+from vlm_ocr_doc_reader.operations import FullDescriptionOperation
+
+# Auto-save ВКЛЮЧЕН по умолчанию
+processor = DocumentProcessor("report.pdf", state_dir="state")  # auto_save=True
+
+full_desc = FullDescriptionOperation(processor)
+result = full_desc.execute()  # ← автоматически сохранится в state_dir/results/full_description.yaml
+```
+
+**Эксперименты без автосохранения:**
+
+```python
+# Auto-save ВЫКЛЮЧЕН
+processor = DocumentProcessor("report.pdf", state_dir="state", auto_save=False)
+
+for prompt in test_prompts:
+    triage = TriageOperation(processor)
+    result = triage.execute(prompt)  # ← НЕ сохраняется
+
+# Явное сохранение только удачного результата
+processor.save_state()
+```
+
+**Структура state_dir:**
+
+```
+state_dir/
+├── cache/
+│   ├── pages/              # Рендеренные страницы (PNG)
+│   │   ├── page_001.png
+│   │   ├── page_002.png
+│   │   └── ...
+│   └── vlm_responses/      # VLM ответы (JSON)
+│       ├── response_full_desc.json
+│       └── response_cluster.json
+│
+├── results/                # Результаты operations (YAML)
+│   ├── full_description.yaml
+│   ├── clustering.yaml
+│   ├── triage.yaml
+│   └── extraction.yaml
+│
+├── logs/                   # Логи (если state_dir задан)
+│   └── vlm_ocr.log
+│
+└── state.json              # Metadata (auto_save, DPI, etc.)
+```
+
+**Форматы хранения:**
+- **Technical** (PNG, JSON) - в `cache/`
+- **Content** (results) - в `results/` как YAML (человеко-читаемые)
+- **Metadata** - `state.json`
+
+### 3.7. Иерархия настроек DPI для рендеринга
+
+**Уровни настроек (от общего к частному):**
+
+```python
+# Уровень 1: Глобальный дефолт в процессоре
+processor = DocumentProcessor("report.pdf", config={
+    "render_dpi": 150  # разумный дефолт для всех операций
+})
+
+# Уровень 2: Переопределение в operation
+full_desc = FullDescriptionOperation(
+    processor,
+    render_dpi=200  # выше для точности извлечения
+)
+
+# Уровень 3: Явный вызов renderer (редкий случай)
+pages = processor._render_pdf(dpi=300)
+```
+
+**Принцип:** Настройки "сверху-вниз" - дефолт можно переопределить на любом уровне.
+
 ---
 
 ## 4. Интеграционные точки
@@ -223,14 +341,53 @@ class DocumentData:
 **Переиспользовать:**
 - `GeminiRestClient` - базовый VLM клиент с retry, exponential backoff
 - `VLMClient` - обертка с throttling (min_interval_s: 0.6)
-- `QwenClient` - OCR для числовых полей (формат ЗНАЧЕНИЕ/КОНТЕКСТ/ПОЯСНЕНИЕ)
+- `QwenClient` - OCR для числовых полей с форматом ответа:
+  ```
+  ЗНАЧЕНИЕ: <значение>
+  КОНТЕКСТ: <фрагмент текста>
+  ПОЯСНЕНИЕ: <объяснение>
+  ```
 - `pdf_utils.py` - рендеринг PDF→PNG (DPI: 110-150, quality: 80-85)
 - PageBatching - группировка страниц (head/tail/union)
 - HybridDialogueManager - function calling с инструментами
+- **OCR нормализация:** O→0, l→1, S→5, B→8
 
 **НЕ переносить:**
 - Специфичные поля аудиторских заключений
 - Field processors (доменная логика аудита)
+
+### 4.3. Конфигурация модуля
+
+**Источники конфигурации (в порядке приоритета):**
+
+1. **Переменные окружения** (для секретов):
+   ```bash
+   GEMINI_API_KEY=xxx
+   QWEN_API_KEY=yyy
+   ```
+
+2. **При создании процессора** (основная конфигурация):
+   ```python
+   processor = DocumentProcessor(
+       source="report.pdf",
+       state_dir="03_data/state",
+       auto_save=True,
+       config={
+           "render_dpi": 150,
+           "log_level": "INFO"
+       }
+   )
+   ```
+
+3. **На уровне operations** (переопределение):
+   ```python
+   full_desc = FullDescriptionOperation(processor, render_dpi=200)
+   ```
+
+**Логирование:**
+- **По умолчанию:** stdout (уровень INFO)
+- **Если задан state_dir:** additionally → `state_dir/logs/vlm_ocr.log`
+- **Настройка:** через `config["log_level"]` или переменную `VLM_LOG_LEVEL`
 
 ---
 
@@ -262,4 +419,5 @@ class DocumentData:
 
 | Дата | Версия | Изменения | Автор |
 |------|--------|-----------|-------|
+| 2025-01-27 | 1.1 | Добавлены входные данные, auto-save, DPI иерархия, OCR формат, конфигурация, явный акцент на operations подход | Architect |
 | 2025-01-27 | 1.0 | Черновик архитектуры | Architect |
