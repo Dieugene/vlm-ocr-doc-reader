@@ -1,6 +1,6 @@
 # Backlog: vlm-ocr-doc-reader
 
-**Версия:** 2.0
+**Версия:** 3.0
 **Дата:** 2025-01-27
 **Владелец:** Tech Lead
 
@@ -15,6 +15,9 @@
 | 003 | OCR support (OCR Client, OCR Tool) | Medium | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
 | 004 | High-level operations (FullDescriptionOperation) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 002 |
 | 005 | Критические баги (JSON mode, VLMAgent, OCR Tool) | Critical | Выполнена | 2025-01-27 | 2025-01-28 | Задачи 001-004 |
+| 006 | pyproject.toml и подготовка к публикации (GitHub) | High | Выполнена | 2025-01-28 | 2025-01-28 | Нет |
+| 007 | CLI интерфейс для распознавания документов | High | Выполнена | 2025-01-28 | 2025-01-28 | Нет |
+| 007 | CLI интерфейс для распознавания документов | High | Не начата | - | - | Нет |
 
 ---
 
@@ -102,14 +105,59 @@
 
 ---
 
+### Задача 006: pyproject.toml и подготовка к публикации
+
+**Модули:**
+- `pyproject.toml` — современная конфигурация пакета
+- Публичный API в `vlm_ocr_doc_reader/__init__.py`
+- README с примерами использования
+
+**Критерии готовности:**
+- [ ] `pyproject.toml` с metadata (name, version, dependencies)
+- [ ] Entry points для установки: `pip install -e .`
+- [ ] Публичный API экспортируется через `__init__.py`
+- [ ] README с примерами использования (создание клиентов, процессора, операции)
+- [ ] `.gitignore` исключает `build/`, `dist/`, `*.egg-info/`
+- [ ] Проверка установки: `pip install -e .` успешна
+
+**Reference:** Python packaging standards (PEP 517/518)
+
+---
+
+### Задача 007: CLI интерфейс для распознавания документов
+
+**Модули:**
+- `vlm_ocr_doc_reader/cli.py` — CLI entry point
+- Регистрация в `pyproject.toml` как `[project.scripts]`
+
+**Критерии готовности:**
+- [ ] CLI принимает путь к PDF как аргумент
+- [ ] CLI принимает опциональный `--output-dir` для сохранения результатов
+- [ ] CLI использует `FullDescriptionOperation` под капотом
+- [ ] CLI сохраняет результаты в YAML (`state_dir/results/full_description.yaml`)
+- [ ] CLI показывает прогресс (логирование в stdout)
+- [ ] Unit тесты для CLI (мокованное выполнение)
+- [ ] Интеграционный тест: CLI с реальным PDF
+
+**Пример использования:**
+```bash
+vlm-ocr-reader document.pdf --output-dir ./results
+```
+
+**Reference:** `02_src/vlm_ocr_doc_reader/operations/full_description.py`
+
+---
+
 ## Параллельность задач
 
 **Можно запускать параллельно:**
 - Задачи 001 и 002 (минимум зависимостей)
 - Задача 003 с Задачей 002 (после завершения Задачи 001)
+- Задачи 006 и 007 (независимые, после задач 001-005)
 
 **Последовательная зависимость:**
 - Задача 004 после завершения Задачи 002
+- Задачи 006 и 007 после завершения задач 001-005
 
 **Диаграмма зависимостей:**
 
@@ -120,8 +168,16 @@ graph TD
 
     Z2 --> Z4[Задача 004: Operations]
 
+    Z2 --> Z5[Задача 005: Bug fixes]
+    Z3 --> Z5
+
+    Z5 --> Z6[Задача 006: pyproject.tomm]
+    Z5 --> Z7[Задача 007: CLI]
+
     style Z2 fill:#f9f,stroke:#333,stroke-width:4px
     style Z4 fill:#9f9,stroke:#333,stroke-width:2px
+    style Z6 fill:#ff9,stroke:#333,stroke-width:2px
+    style Z7 fill:#ff9,stroke:#333,stroke-width:2px
 ```
 
 ---
@@ -142,5 +198,6 @@ graph TD
 
 | Дата | Версия | Изменения | Автор |
 |------|--------|-----------|-------|
+| 2025-01-28 | 3.0 | Добавлены задачи 006 (pyproject.toml) и 007 (CLI) для подготовки к публикации | Tech Lead |
 | 2025-01-27 | 2.0 | Переписан с укрупненными задачами (4 задачи вместо 37) | Tech Lead |
 | 2025-01-27 | 1.0 | Первая версия (детализированный backlog) | Architect |
