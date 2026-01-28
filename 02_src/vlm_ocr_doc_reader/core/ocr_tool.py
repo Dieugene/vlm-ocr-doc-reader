@@ -64,7 +64,7 @@ class OCRTool:
         Args:
             page_num: Page number
             prompt: Extraction prompt
-            image: Image bytes
+            image: Image bytes (PNG format)
 
         Returns:
             {
@@ -77,6 +77,7 @@ class OCRTool:
         """
         logger.info(f"OCR tool execution: page={page_num}, prompt='{prompt}'")
 
+        # Execute OCR via client
         result = self.ocr_client.extract(image, prompt, page_num)
 
         # Post-processing for numeric fields

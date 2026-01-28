@@ -1,135 +1,55 @@
-# Test Suite for VLM OCR Document Reader
+# Тесты vlm-ocr-doc-reader
 
-## Structure
+Все тесты в этом проекте - **интеграционные с реальным API**.
+
+## Структура
 
 ```
 tests/
-├── unit/                   # Unit tests (mock everything)
-│   └── test_full_description.py
-├── integration/            # Integration tests (real API)
-│   └── test_full_description_api.py
-└── README.md
+├── integration/                    # Интеграционные тесты с реальным API
+│   ├── test_full_description_api.py
+│   ├── test_full_description_with_processor.py
+│   └── test_vlm_client_real_api.py
+└── test_core/                      # Unit тесты для модулей
+    ├── test_preprocessing.py
+    ├── test_state.py
+    ├── test_vlm_client.py
+    ├── test_vlm_agent.py
+    ├── test_ocr_client.py
+    ├── test_ocr_tool.py
+    └── test_processor.py
 ```
 
-## Running Tests
+## Интеграционные тесты
 
-### Prerequisites
+Требуют `.env` файл с API ключами:
+```bash
+GEMINI_API_KEY=your_key_here
+```
 
-1. **Create virtual environment:**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env and add your GEMINI_API_KEY
-   ```
-
-### Run Unit Tests
-
-Unit tests use mocks and don't require API keys:
+### Запуск интеграционных тестов:
 
 ```bash
-# Run all unit tests
-pytest tests/unit/ -v
+# Все интеграционные тесты
+pytest tests/integration/ -v
 
-# Run specific test file
-pytest tests/unit/test_full_description.py -v
+# Только с DocumentProcessor
+pytest tests/integration/test_full_description_with_processor.py -v
 
-# Run with coverage
-pytest tests/unit/ --cov=vlm_ocr_doc_reader --cov-report=html
+# Только VLM клиент
+pytest tests/integration/test_vlm_client_real_api.py -v
 ```
 
-### Run Integration Tests
+## Сквозной тест
 
-Integration tests require real API keys:
+Для быстрой проверки всего пайплайна:
 
 ```bash
-# Run all integration tests
-pytest tests/integration/ -v -m integration
-
-# Run specific integration test
-pytest tests/integration/test_full_description_api.py -v -s
+python run_e2e_test.py
 ```
 
-**Note:** Integration tests are skipped if `GEMINI_API_KEY` is not set in `.env`.
-
-### Run All Tests
-
-```bash
-# Run everything (unit + integration)
-pytest tests/ -v
-
-# Skip integration tests
-pytest tests/ -v -m "not integration"
-```
-
-## Test Coverage
-
-- **Unit tests**: Cover logic with mocked dependencies
-- **Integration tests**: Verify contract with real Gemini API
-- **Contract tests**: Ensure compatibility with project 07
-
-## Current Test Coverage
-
-### Unit Tests (test_full_description.py)
-
-- Initialization with/without DPI
-- DocumentData return type
-- Text extraction
-- Structure extraction
-- Page filtering
-- JSON parsing with/without markdown fences
-- Error handling (invalid JSON, malformed headers)
-- Image extraction from PageInfo and bytes
-
-### Integration Tests (test_full_description_api.py)
-
-- Text extraction from real PDF
-- Structure extraction from real PDF
-- Page filtering
-- Contract compliance with project 07
-- Tables empty in v0.1.0
-
-## Adding New Tests
-
-When adding new operations:
-
-1. Create unit test in `tests/unit/`
-2. Create integration test in `tests/integration/`
-3. Mock DocumentProcessor contract
-4. Test both success and error cases
-5. Verify contract compliance
-
-## Troubleshooting
-
-### Tests fail with import errors
-
-Make sure `PYTHONPATH` includes `02_src`:
-
-```bash
-export PYTHONPATH="${PYTHONPATH}:02_src"
-# Or on Windows:
-set PYTHONPATH=%PYTHONPATH%;02_src
-```
-
-### Integration tests skipped
-
-Check that `.env` file exists and contains valid `GEMINI_API_KEY`.
-
-### PDF rendering fails
-
-Integration tests create a simple test PDF automatically. If `reportlab` is not installed, tests will be skipped.
-
-Install it manually if needed:
-
-```bash
-pip install reportlab
-```
+Этот скрипт:
+1. Создает тестовый PDF
+2. Обрабатывает через DocumentProcessor
+3. Выполняет FullDescriptionOperation
+4. Показывает результаты

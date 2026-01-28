@@ -221,11 +221,7 @@ class GeminiVLMClient(BaseVLMClient):
         # Add tools if provided
         if tools:
             payload["tools"] = tools
-        else:
-            # Use JSON mode for simple prompts
-            payload["generationConfig"] = {
-                "responseMimeType": "application/json"
-            }
+        # No JSON mode for simple prompts - return plain text
 
         headers = {'Content-Type': 'application/json'}
 
@@ -289,16 +285,15 @@ class GeminiVLMClient(BaseVLMClient):
                     "raw": result
                 }
             else:
-                # Simple JSON response
+                # Simple text response - return as string, not parsed JSON
                 text_content = parts_resp[0].get('text', '')
                 logger.debug(f"Response text length: {len(text_content)}")
 
-                parsed = json.loads(text_content)
                 return {
-                    "text": parsed,
+                    "text": text_content,
                     "raw": result
                 }
 
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
+        except (KeyError, IndexError) as e:
             logger.error(f"Failed to parse Gemini response: {e}. Raw response: {result}")
             raise ValueError(f"Failed to parse Gemini response: {e}") from e

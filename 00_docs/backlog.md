@@ -14,6 +14,7 @@
 | 002 | VLM processing (VLM Client, VLM Agent, DocumentProcessor) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
 | 003 | OCR support (OCR Client, OCR Tool) | Medium | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
 | 004 | High-level operations (FullDescriptionOperation) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 002 |
+| 005 | Критические баги (JSON mode, VLMAgent, OCR Tool) | Critical | Выполнена | 2025-01-27 | 2025-01-28 | Задачи 001-004 |
 
 ---
 
