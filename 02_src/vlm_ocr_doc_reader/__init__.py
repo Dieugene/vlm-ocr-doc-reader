@@ -20,8 +20,8 @@ from .core.ocr_tool import OCRTool
 from .operations.base import BaseOperation
 from .operations.full_description import FullDescriptionOperation
 
-# Schemas
-from .schemas.config import ProcessorConfig, VLMConfig
+# Schemas - Config
+from .schemas.config import ProcessorConfig, VLMConfig, OCRConfig
 from .schemas.document import DocumentData, HeaderInfo, TableInfo
 from .schemas.common import PageInfo, ClusterInfo, TriageResult
 from .preprocessing.renderer import RenderConfig
@@ -46,6 +46,7 @@ __all__ = [
     # Schemas - Config
     "ProcessorConfig",
     "VLMConfig",
+    "OCRConfig",
     "OCRConfig",
     "RenderConfig",
 

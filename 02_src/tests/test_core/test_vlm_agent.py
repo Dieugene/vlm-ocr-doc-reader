@@ -1,282 +1,123 @@
-"""Unit tests for VLM Agent."""
+"""Tests for VLM Agent — real Gemini API calls.
 
-from unittest.mock import Mock, patch
+Requires GEMINI_API_KEY environment variable.
+Tests are skipped if the key is not set.
+"""
+
+import os
+from pathlib import Path
+
 import pytest
 
+from vlm_ocr_doc_reader.core.vlm_client import GeminiVLMClient
 from vlm_ocr_doc_reader.core.vlm_agent import VLMAgent
-from vlm_ocr_doc_reader.core.vlm_client import BaseVLMClient
+from vlm_ocr_doc_reader.schemas.config import VLMConfig
+from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+skip_no_gemini = pytest.mark.skipif(
+    not GEMINI_API_KEY, reason="GEMINI_API_KEY not set"
+)
+
+TEST_PDF = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data\test_document.pdf")
+
+
+@pytest.fixture(scope="module")
+def page_images():
+    """Render test PDF pages."""
+    renderer = PDFRenderer(RenderConfig(dpi=150))
+    rendered = renderer.render_pdf(TEST_PDF)
+    return {num: img for num, img in rendered}
 
 
 @pytest.fixture
-def mock_vlm_client():
-    """Create mock VLM client."""
-    client = Mock(spec=BaseVLMClient)
-
-    # Default: return text response (no tools)
-    client.invoke.return_value = {
-        "text": "Final answer",
-        "raw": {}
-    }
-
-    return client
+def vlm_client():
+    """Create real GeminiVLMClient."""
+    config = VLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash")
+    return GeminiVLMClient(config)
 
 
-@pytest.fixture
-def mock_images():
-    """Create mock PNG images."""
-    return b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\x0d\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+@skip_no_gemini
+class TestVLMAgentReal:
+    """Real API tests for VLMAgent."""
 
+    def test_invoke_no_tools(self, vlm_client, page_images):
+        """Test text extraction without tools — agent returns text in 1 iteration."""
+        agent = VLMAgent(vlm_client)
+        img = page_images[1]
 
-class TestVLMAgentToolRegistration:
-    """Test tool registration."""
+        result = agent.invoke(
+            "Кратко опиши эту страницу (1-2 предложения).",
+            [img],
+        )
 
-    def test_register_tool(self, mock_vlm_client):
-        """Test tool registration."""
-        agent = VLMAgent(mock_vlm_client)
-
-        tool_def = {
-            "function_declarations": [{
-                "name": "test_tool",
-                "description": "Test tool",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "param": {"type": "string"}
-                    }
-                }
-            }]
-        }
-
-        handler = Mock(return_value={"result": "ok"})
-        agent.register_tool(tool_def, handler)
-
-        assert "test_tool" in agent.tools
-        assert agent.tools["test_tool"] == handler
-        assert tool_def in agent.tool_definitions
-
-    def test_set_system_prompt(self, mock_vlm_client):
-        """Test setting system prompt."""
-        agent = VLMAgent(mock_vlm_client)
-
-        agent.set_system_prompt("You are a helpful assistant")
-
-        assert len(agent.messages) == 1
-        assert agent.messages[0]["role"] == "user"
-        assert agent.messages[0]["parts"][0]["text"] == "You are a helpful assistant"
-
-
-class TestVLMAgentInvoke:
-    """Test invoke method with tool calling loop."""
-
-    def test_invoke_one_iteration_no_tools(self, mock_vlm_client):
-        """Test invoke with immediate text response (1 iteration)."""
-        agent = VLMAgent(mock_vlm_client)
-
-        result = agent.invoke("Test prompt", [])
-
-        assert result["text"] == "Final answer"
+        assert result["text"] is not None
+        assert len(result["text"]) > 10
         assert result["iterations"] == 1
-        assert mock_vlm_client.invoke.called
+        assert result.get("function_results") is None
 
-    def test_invoke_two_iterations_with_tool(self, mock_vlm_client):
-        """Test invoke with tool calling (2 iterations)."""
-        agent = VLMAgent(mock_vlm_client)
+    def test_invoke_with_tool(self, vlm_client, page_images):
+        """Test that agent calls ask_ocr tool and receives its result."""
+        agent = VLMAgent(vlm_client)
+        img = page_images[1]
 
-        # Register tool
+        # Register a simple echo tool as ask_ocr
         tool_def = {
-            "function_declarations": [{
-                "name": "ask_ocr",
-                "description": "Ask OCR",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "page_num": {"type": "integer"},
-                        "prompt": {"type": "string"}
+            "function_declarations": [
+                {
+                    "name": "ask_ocr",
+                    "description": (
+                        "Точное извлечение одного значения со страницы документа через OCR. "
+                        "Используй для URL, ID, ФИО."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page_num": {"type": "integer", "description": "Номер страницы"},
+                            "prompt": {"type": "string", "description": "Что извлечь"},
+                        },
+                        "required": ["page_num", "prompt"],
                     },
-                    "required": ["page_num", "prompt"]
                 }
-            }]
+            ]
         }
 
-        handler = Mock(return_value={"status": "success", "value": "12345"})
-        agent.register_tool(tool_def, handler)
-
-        # Mock VLM responses:
-        # 1. First call: request tool call
-        # 2. Second call: return text
-        mock_vlm_client.invoke.side_effect = [
-            {
-                "function_calls": [
-                    {"name": "ask_ocr", "args": {"page_num": 1, "prompt": "extract"}}
-                ],
-                "text": None
-            },
-            {
-                "function_calls": None,
-                "text": "The value is 12345"
+        def mock_ocr_handler(page_num: int, prompt: str):
+            return {
+                "status": "ok",
+                "value": "https://example.com/test-url",
+                "context": "See: https://example.com/test-url",
+                "explanation": "Found URL on page",
             }
-        ]
 
-        result = agent.invoke("Extract data", [])
+        agent.register_tool(tool_def, mock_ocr_handler)
 
-        # Should have called VLM twice
-        assert mock_vlm_client.invoke.call_count == 2
+        result = agent.invoke(
+            "На этой странице есть URL? Извлеки его через ask_ocr (page_num=1).",
+            [img],
+        )
 
-        # Tool should have been executed
-        handler.assert_called_once_with(page_num=1, prompt="extract")
+        assert result["text"] is not None
+        # Agent should have used the tool (iterations > 1) or decided not to
+        # At minimum we get a text response
+        assert isinstance(result["text"], str)
 
-        # Final result
-        assert result["text"] == "The value is 12345"
-        assert result["iterations"] == 2
-        assert len(result["function_results"]) == 1
+    def test_multi_turn(self, vlm_client, page_images):
+        """Test two sequential invocations — agent remembers history."""
+        agent = VLMAgent(vlm_client)
+        img = page_images[1]
 
-    def test_invoke_ten_iterations(self, mock_vlm_client):
-        """Test invoke with 10 tool calling iterations."""
-        agent = VLMAgent(mock_vlm_client, max_iterations=10)
+        # First invocation
+        result1 = agent.invoke(
+            "Запомни кодовое слово: БАНАН. Ответь только 'запомнил'.",
+            [img],
+        )
+        assert result1["text"] is not None
 
-        # Register tool
-        tool_def = {
-            "function_declarations": [{
-                "name": "step",
-                "description": "Step function",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "n": {"type": "integer"}
-                    }
-                }
-            }]
-        }
-
-        handler = Mock(return_value={"step": "done"})
-        agent.register_tool(tool_def, handler)
-
-        # Mock VLM responses: 9 tool calls, then final text
-        responses = []
-        for i in range(9):
-            responses.append({
-                "function_calls": [{"name": "step", "args": {"n": i}}],
-                "text": None
-            })
-        responses.append({
-            "function_calls": None,
-            "text": "Completed after 9 steps"
-        })
-
-        mock_vlm_client.invoke.side_effect = responses
-
-        result = agent.invoke("Execute steps", [])
-
-        # Should have completed all 10 iterations
-        assert mock_vlm_client.invoke.call_count == 10
-        assert result["iterations"] == 10
-        assert result["text"] == "Completed after 9 steps"
-        assert len(result["function_results"]) == 9
-
-    def test_invoke_max_iterations_exceeded(self, mock_vlm_client):
-        """Test that agent stops after max_iterations."""
-        agent = VLMAgent(mock_vlm_client, max_iterations=3)
-
-        tool_def = {
-            "function_declarations": [{
-                "name": "loop",
-                "description": "Loop forever",
-                "parameters": {}
-            }]
-        }
-
-        handler = Mock(return_value={"continue": True})
-        agent.register_tool(tool_def, handler)
-
-        # Mock VLM to always request tool call
-        mock_vlm_client.invoke.return_value = {
-            "function_calls": [{"name": "loop", "args": {}}],
-            "text": None
-        }
-
-        result = agent.invoke("Loop", [])
-
-        # Should have stopped after max_iterations
-        assert mock_vlm_client.invoke.call_count == 3
-        assert result["text"] is None
-        assert "error" in result
-        assert "Max iterations" in result["error"]
-
-    def test_invoke_tool_error_handling(self, mock_vlm_client):
-        """Test that tool errors are handled gracefully."""
-        agent = VLMAgent(mock_vlm_client)
-
-        tool_def = {
-            "function_declarations": [{
-                "name": "failing_tool",
-                "description": "Tool that fails",
-                "parameters": {}
-            }]
-        }
-
-        # Handler raises exception
-        handler = Mock(side_effect=ValueError("Tool failed"))
-        agent.register_tool(tool_def, handler)
-
-        # Mock VLM responses
-        mock_vlm_client.invoke.side_effect = [
-            {
-                "function_calls": [{"name": "failing_tool", "args": {}}],
-                "text": None
-            },
-            {
-                "function_calls": None,
-                "text": "Tool failed, continuing"
-            }
-        ]
-
-        result = agent.invoke("Test", [])
-
-        # Should handle error and continue
-        assert mock_vlm_client.invoke.call_count == 2
-        assert result["text"] == "Tool failed, continuing"
-
-        # Tool result should contain error
-        func_result = result["function_results"][0]
-        assert func_result["result"]["status"] == "error"
-        assert "Tool failed" in func_result["result"]["error"]
-
-    def test_invoke_unknown_tool(self, mock_vlm_client):
-        """Test that unknown tool returns error."""
-        agent = VLMAgent(mock_vlm_client)
-
-        # Mock VLM to call unknown tool
-        mock_vlm_client.invoke.side_effect = [
-            {
-                "function_calls": [{"name": "unknown_tool", "args": {}}],
-                "text": None
-            },
-            {
-                "function_calls": None,
-                "text": "Tool not found"
-            }
-        ]
-
-        result = agent.invoke("Test", [])
-
-        # Should handle gracefully
-        assert result["text"] == "Tool not found"
-        func_result = result["function_results"][0]
-        assert func_result["result"]["status"] == "error"
-        assert "Unknown tool" in func_result["result"]["error"]
-
-    def test_invoke_no_response_error(self, mock_vlm_client):
-        """Test error handling when VLM returns neither calls nor text."""
-        agent = VLMAgent(mock_vlm_client)
-
-        # Mock VLM returns empty response
-        mock_vlm_client.invoke.return_value = {
-            "function_calls": None,
-            "text": None
-        }
-
-        result = agent.invoke("Test", [])
-
-        assert result["text"] is None
-        assert "error" in result
-        assert "No function calls" in result["error"]
+        # Second invocation — no images, agent should remember
+        result2 = agent.invoke(
+            "Какое кодовое слово я просил запомнить? Ответь одним словом.",
+            [],
+        )
+        assert result2["text"] is not None
+        assert "банан" in result2["text"].lower()

@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# Import OCRConfig from ocr_client module
+from ..core.ocr_client import OCRConfig
+
 
 @dataclass
 class VLMConfig:

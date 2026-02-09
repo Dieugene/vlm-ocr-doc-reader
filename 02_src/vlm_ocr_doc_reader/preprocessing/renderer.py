@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import fitz  # pymupdf
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +77,17 @@ class PDFRenderer:
                 if mode == "RGBA":
                     img = img.convert("RGB")
 
+                # Stamp page number onto image
+                page_num = idx + 1
+                self._stamp_page_number(img, page_num, total_pages)
+
                 # Save as PNG bytes
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
                 image_bytes = buf.getvalue()
 
                 # Return 1-based page number for user convenience
-                results.append((idx + 1, image_bytes))
+                results.append((page_num, image_bytes))
 
             logger.info(f"Successfully rendered {len(results)} pages")
             return results
@@ -139,6 +143,9 @@ class PDFRenderer:
             if mode == "RGBA":
                 img = img.convert("RGB")
 
+            # Stamp page number onto image
+            self._stamp_page_number(img, page_num, total_pages)
+
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             image_bytes = buf.getvalue()
@@ -152,3 +159,49 @@ class PDFRenderer:
 
         finally:
             doc.close()
+
+    @staticmethod
+    def _stamp_page_number(img: Image.Image, page_num: int, total_pages: int) -> None:
+        """Draw page marker [G{page_num}] in the top-left corner of the image.
+
+        Modifies image in-place. Uses opaque white background with black
+        border for contrast with any document content.
+
+        Args:
+            img: PIL Image to stamp (modified in-place)
+            page_num: 1-based page number
+            total_pages: Total number of pages in document
+        """
+        label = f"[G{page_num}]"
+
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", 24)
+        except OSError:
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24
+                )
+            except OSError:
+                font = ImageFont.load_default()
+
+        # Measure text
+        bbox = draw.textbbox((0, 0), label, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        # Position: top-left corner, 6px offset
+        x, y = 6, 6
+        padding = 4
+
+        # Opaque white background with black border
+        draw.rectangle(
+            [x - padding, y - padding, x + text_w + padding, y + text_h + padding],
+            fill="white",
+            outline="black",
+            width=1,
+        )
+
+        # Draw text
+        draw.text((x, y), label, fill="black", font=font)

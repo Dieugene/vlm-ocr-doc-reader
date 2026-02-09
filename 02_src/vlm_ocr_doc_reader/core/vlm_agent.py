@@ -1,7 +1,6 @@
 """VLM Agent - Agentic entity with tool calling loop."""
 
 import base64
-import json
 import logging
 from typing import Dict, List, Any, Callable, Optional
 
@@ -34,9 +33,8 @@ class VLMAgent:
         self.vlm_client = vlm_client
         self.max_iterations = max_iterations
         self.messages: List[Dict] = []
-        self.tools: Dict[str, Callable] = {}  # tool_name → handler
+        self.tools: Dict[str, Callable] = {}  # tool_name -> handler
         self.tool_definitions: List[Dict] = []  # Tool definitions for VLM
-        self._images: Dict[int, bytes] = {}  # page_num → image (for OCR tool)
 
     def register_tool(self, tool_def: Dict, handler: Callable) -> None:
         """Register a tool with its handler.
@@ -115,10 +113,6 @@ class VLMAgent:
             "parts": user_parts
         })
 
-        # Store images for tool handlers (e.g., OCR tool needs images)
-        # Store with sequential page numbers starting from 1
-        self._images = {i + 1: img for i, img in enumerate(images)}
-
         # Tool calling loop
         function_results: List[Dict] = []
 
@@ -128,39 +122,10 @@ class VLMAgent:
             # Prepare tools for VLM
             tools = self.tool_definitions if self.tool_definitions else None
 
-            # For Gemini API, we need to build contents from messages
-            # Extract the latest user message's text and images
-            latest_user_msg = None
-            for msg in reversed(self.messages):
-                if msg.get("role") == "user":
-                    latest_user_msg = msg
-                    break
-
-            if not latest_user_msg:
-                raise ValueError("No user message found in history")
-
-            # Extract text prompt from parts
-            prompt_text = ""
-            for part in latest_user_msg.get("parts", []):
-                if "text" in part:
-                    prompt_text += part["text"]
-                elif "inline_data" in part:
-                    # Image - will be extracted separately
-                    pass
-
-            # Extract images from latest user message
-            images = []
-            for part in latest_user_msg.get("parts", []):
-                if "inline_data" in part:
-                    import base64
-                    img_data = part["inline_data"]["data"]
-                    images.append(base64.b64decode(img_data))
-
             try:
-                # Call VLM with extracted prompt and images
+                # Call VLM with full conversation history
                 response = self.vlm_client.invoke(
-                    prompt=prompt_text,
-                    images=images,
+                    contents=self.messages,
                     tools=tools
                 )
             except Exception as e:
@@ -199,7 +164,7 @@ class VLMAgent:
                     func_name = fc["name"]
                     func_args = fc.get("args", {})
 
-                    logger.info(f"Executing tool: {func_name} with args: {func_args}")
+                    logger.info(f"Tool call: {func_name}({func_args})")
 
                     if func_name not in self.tools:
                         error_msg = f"Unknown tool: {func_name}"
@@ -208,23 +173,12 @@ class VLMAgent:
                     else:
                         try:
                             handler = self.tools[func_name]
-
-                            # Special handling for OCR tool - pass image
-                            if func_name == "ask_ocr":
-                                page_num = func_args.get("page_num")
-                                image = self._images.get(page_num)
-
-                                if not image:
-                                    error_msg = f"Image not found for page {page_num}"
-                                    logger.error(error_msg)
-                                    result = {"error": error_msg, "status": "error"}
-                                else:
-                                    result = handler(page_num=page_num, prompt=func_args.get("prompt", ""), image=image)
-                                    logger.info(f"Tool {func_name} executed successfully")
-                            else:
-                                # Other tools - call with args only
-                                result = handler(**func_args)
-                                logger.info(f"Tool {func_name} executed successfully")
+                            result = handler(**func_args)
+                            logger.info(
+                                f"Tool result: {func_name} -> "
+                                f"status={result.get('status', '?')} | "
+                                f"value='{result.get('value', '')}'"
+                            )
                         except Exception as e:
                             error_msg = f"Tool {func_name} failed: {e}"
                             logger.exception(error_msg)

@@ -12,6 +12,9 @@ from ..schemas.config import ProcessorConfig, VLMConfig
 from ..preprocessing.renderer import PDFRenderer, RenderConfig
 from .vlm_client import BaseVLMClient, GeminiVLMClient
 from .state import StateManager, MemoryStorage, DiskStorage
+from .vlm_agent import VLMAgent
+from .ocr_client import BaseOCRClient, QwenOCRClient, OCRConfig
+from .ocr_tool import OCRTool
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ class DocumentProcessor:
     def __init__(
         self,
         source: Union[Path, List[bytes]],
-        vlm_client: Optional[BaseVLMClient] = None,
+        vlm_agent: Optional[VLMAgent] = None,
         state_manager: Optional[StateManager] = None,
         auto_save: bool = True,
         config: Optional[ProcessorConfig] = None,
@@ -41,7 +44,7 @@ class DocumentProcessor:
 
         Args:
             source: PDF file path or list of PNG bytes
-            vlm_client: VLM client (optional, created from config if not provided)
+            vlm_agent: VLM agent (optional, created from config if not provided)
             state_manager: State manager instance (optional, created if not provided)
             auto_save: Automatically save state after operations
             config: Processor configuration
@@ -50,25 +53,7 @@ class DocumentProcessor:
         self.config = config or ProcessorConfig()
         self.auto_save = auto_save
 
-        # Initialize VLM client if not provided
-        if vlm_client is None:
-            # Need API key from environment
-            load_dotenv()
-            api_key = os.getenv("GEMINI_API_KEY")
-
-            if not api_key:
-                raise ValueError(
-                    "GEMINI_API_KEY not found in environment. "
-                    "Please set it in .env file or pass vlm_client explicitly."
-                )
-
-            vlm_config = VLMConfig(api_key=api_key)
-            vlm_client = GeminiVLMClient(vlm_config)
-            logger.info("Created GeminiVLMClient from environment")
-
-        self.vlm_client = vlm_client
-
-        # Initialize state manager if not provided
+        # 1. Initialize state manager FIRST (needed by OCR tool)
         if state_manager is None:
             if self.config.state_dir is not None:
                 storage = DiskStorage(self.config.state_dir)
@@ -81,6 +66,47 @@ class DocumentProcessor:
             )
 
         self.state_manager = state_manager
+
+        # 2. Initialize VLM Agent if not provided
+        if vlm_agent is None:
+            # Need API key from environment
+            load_dotenv()
+            api_key = os.getenv("GEMINI_API_KEY")
+
+            if not api_key:
+                raise ValueError(
+                    "GEMINI_API_KEY not found in environment. "
+                    "Please set it in .env file or pass vlm_agent explicitly."
+                )
+
+            # Create VLM client
+            vlm_config = VLMConfig(api_key=api_key)
+            vlm_client = GeminiVLMClient(vlm_config)
+
+            # Create OCR client and tool (optional, if QWEN_API_KEY is set)
+            try:
+                ocr_config = OCRConfig()  # Loads QWEN_API_KEY from environment
+                ocr_client = QwenOCRClient(ocr_config)
+                ocr_tool = OCRTool(ocr_client, self.state_manager)
+                logger.info("Created QwenOCRClient from environment")
+            except ValueError:
+                # QWEN_API_KEY not set - OCR tool will not be available
+                ocr_tool = None
+                logger.warning(
+                    "QWEN_API_KEY not found - OCR tool will not be registered. "
+                    "VLM will still work but cannot call OCR."
+                )
+
+            # Create VLM agent and register OCR tool if available
+            vlm_agent = VLMAgent(vlm_client)
+
+            if ocr_tool:
+                vlm_agent.register_tool(ocr_tool.to_tool_definition(), ocr_tool.execute)
+                logger.info("Created VLM Agent with OCR Tool registered")
+            else:
+                logger.info("Created VLM Agent without OCR Tool")
+
+        self.vlm_agent = vlm_agent
 
         # Initialize pages based on source type
         self._pages: List[PageInfo] = []

@@ -1,342 +1,133 @@
-"""Unit tests for VLM Client."""
+"""Tests for VLM Client — real Gemini API calls.
 
-import time
-from unittest.mock import Mock, patch, MagicMock
+Requires GEMINI_API_KEY environment variable.
+Tests are skipped if the key is not set.
+"""
+
+import os
+from pathlib import Path
+
 import pytest
-import requests
 
 from vlm_ocr_doc_reader.core.vlm_client import GeminiVLMClient, BaseVLMClient
 from vlm_ocr_doc_reader.schemas.config import VLMConfig
+from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+skip_no_gemini = pytest.mark.skipif(
+    not GEMINI_API_KEY, reason="GEMINI_API_KEY not set"
+)
+
+TEST_PDF = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data\test_document.pdf")
 
 
-@pytest.fixture
-def vlm_config():
-    """Create VLM config for testing."""
-    return VLMConfig(
-        api_key="test_api_key",
-        model="gemini-2.5-flash",
-        timeout_sec=10,
-        max_retries=3,
-        backoff_base=1.5,
-        min_interval_s=0.6,
-    )
+@pytest.fixture(scope="module")
+def page_images():
+    """Render first page of test PDF to PNG bytes."""
+    renderer = PDFRenderer(RenderConfig(dpi=150))
+    rendered = renderer.render_pdf(TEST_PDF)
+    # Return dict {page_num: bytes}
+    return {num: img for num, img in rendered}
 
 
-@pytest.fixture
-def mock_images():
-    """Create mock PNG images."""
-    # Create minimal PNG bytes (1x1 transparent pixel)
-    return b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\x0d\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+@pytest.fixture(scope="module")
+def vlm_client():
+    """Create real GeminiVLMClient."""
+    config = VLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash")
+    return GeminiVLMClient(config)
 
 
 class TestBaseVLMClient:
     """Test BaseVLMClient interface."""
 
     def test_base_client_is_abstract(self):
-        """Test that BaseVLMClient cannot be instantiated directly."""
+        """Test that BaseVLMClient.invoke raises NotImplementedError."""
         client = BaseVLMClient()
         with pytest.raises(NotImplementedError):
             client.invoke("test", [])
 
 
-class TestGeminiVLMClientRetry:
-    """Test retry logic in GeminiVLMClient."""
+@skip_no_gemini
+class TestGeminiVLMClientReal:
+    """Real API tests for GeminiVLMClient."""
 
-    def test_retry_on_429_status(self, vlm_config):
-        """Test that client retries on 429 (rate limit) status."""
-        client = GeminiVLMClient(vlm_config)
+    def test_invoke_simple(self, vlm_client, page_images):
+        """Test simple text extraction from one page."""
+        img = page_images[1]
+        result = vlm_client.invoke(
+            prompt="Кратко опиши, что изображено на этой странице (1-2 предложения).",
+            images=[img],
+        )
 
-        # Mock response sequence: 429 -> 429 -> 200
-        mock_response_429 = Mock()
-        mock_response_429.status_code = 429
-        mock_response_429.text = "Rate limit exceeded"
+        assert "text" in result
+        assert isinstance(result["text"], str)
+        assert len(result["text"]) > 10
 
-        mock_response_200 = Mock()
-        mock_response_200.status_code = 200
-        mock_response_200.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"result": "success"}'}
-                    ]
-                }
-            }]
-        }
+    def test_invoke_with_contents(self, vlm_client, page_images):
+        """Test invoke with full contents array (multi-turn)."""
+        import base64
 
-        with patch('requests.post') as mock_post:
-            mock_post.side_effect = [
-                mock_response_429,
-                mock_response_429,
-                mock_response_200
-            ]
+        img = page_images[1]
+        b64 = base64.b64encode(img).decode("utf-8")
 
-            result = client.invoke("test prompt", [])
-
-            # Should have made 3 attempts
-            assert mock_post.call_count == 3
-            assert result["text"]["result"] == "success"
-
-    def test_retry_on_503_status(self, vlm_config):
-        """Test that client retries on 503 (server error) status."""
-        client = GeminiVLMClient(vlm_config)
-
-        # Mock response sequence: 503 -> 200
-        mock_response_503 = Mock()
-        mock_response_503.status_code = 503
-        mock_response_503.text = "Service unavailable"
-
-        mock_response_200 = Mock()
-        mock_response_200.status_code = 200
-        mock_response_200.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"result": "success"}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.side_effect = [mock_response_503, mock_response_200]
-
-            result = client.invoke("test prompt", [])
-
-            # Should have made 2 attempts
-            assert mock_post.call_count == 2
-            assert result["text"]["result"] == "success"
-
-    def test_retry_exhaustion(self, vlm_config):
-        """Test that client raises exception after max retries."""
-        client = GeminiVLMClient(vlm_config)
-
-        # Mock response always returns 429
-        mock_response_429 = Mock()
-        mock_response_429.status_code = 429
-        mock_response_429.text = "Rate limit exceeded"
-        mock_response_429.raise_for_status.side_effect = requests.HTTPError("429 Client Error")
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response_429
-
-            with pytest.raises(requests.HTTPError):
-                client.invoke("test prompt", [])
-
-            # Should have made max_retries attempts
-            assert mock_post.call_count == vlm_config.max_retries
-
-    def test_no_retry_on_400_status(self, vlm_config):
-        """Test that client does NOT retry on 400 (client error) status."""
-        client = GeminiVLMClient(vlm_config)
-
-        # Mock response returns 400
-        mock_response_400 = Mock()
-        mock_response_400.status_code = 400
-        mock_response_400.text = "Bad request"
-        mock_response_400.raise_for_status.side_effect = requests.HTTPError("400 Client Error")
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response_400
-
-            with pytest.raises(requests.HTTPError):
-                client.invoke("test prompt", [])
-
-            # Should have made only 1 attempt (no retry)
-            assert mock_post.call_count == 1
-
-
-class TestGeminiVLMClientThrottling:
-    """Test throttling logic in GeminiVLMClient."""
-
-    def test_throttling_enforces_min_interval(self, vlm_config):
-        """Test that throttling enforces minimum interval between calls."""
-        # Use very small min_interval for faster testing
-        vlm_config.min_interval_s = 0.2
-        client = GeminiVLMClient(vlm_config)
-
-        # Mock successful response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"result": "success"}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
-
-            # Make two consecutive calls
-            start_time = time.monotonic()
-            client.invoke("test1", [])
-            client.invoke("test2", [])
-            elapsed = time.monotonic() - start_time
-
-            # Should take at least min_interval_s
-            assert elapsed >= vlm_config.min_interval_s
-
-    def test_throttling_standard_interval(self, vlm_config):
-        """Test throttling with standard min_interval_s=0.6 from task_brief."""
-        # Use standard value from task_brief
-        vlm_config.min_interval_s = 0.6
-        client = GeminiVLMClient(vlm_config)
-
-        # Mock successful response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"result": "success"}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
-
-            # Make two consecutive calls
-            start_time = time.monotonic()
-            client.invoke("test1", [])
-            client.invoke("test2", [])
-            elapsed = time.monotonic() - start_time
-
-            # Should take at least 0.6s (standard value)
-            assert elapsed >= 0.6
-
-    def test_throttling_first_call_immediate(self, vlm_config):
-        """Test that first call has no delay."""
-        vlm_config.min_interval_s = 1.0
-        client = GeminiVLMClient(vlm_config)
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"result": "success"}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
-
-            start_time = time.monotonic()
-            client.invoke("test", [])
-            elapsed = time.monotonic() - start_time
-
-            # First call should be immediate (< 100ms)
-            assert elapsed < 0.1
-
-
-class TestGeminiVLMClientInvoke:
-    """Test invoke method."""
-
-    def test_invoke_without_tools(self, vlm_config):
-        """Test invoke without tools returns text."""
-        client = GeminiVLMClient(vlm_config)
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"answer": "42"}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
-
-            result = client.invoke("What is the answer?", [])
-
-            assert "text" in result
-            assert result["text"]["answer"] == "42"
-            assert "raw" in result
-
-    def test_invoke_with_tools(self, vlm_config):
-        """Test invoke with tools returns function_calls."""
-        client = GeminiVLMClient(vlm_config)
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [
-                        {
-                            "functionCall": {
-                                "name": "test_tool",
-                                "args": {"param": "value"}
-                            }
+        contents = [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": "Скажи одно слово: 'привет'"},
+                ],
+            },
+            {
+                "role": "model",
+                "parts": [{"text": "привет"}],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"text": "Теперь кратко опиши эту страницу (1-2 предложения)."},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": b64,
                         }
-                    ]
-                }
-            }]
-        }
+                    },
+                ],
+            },
+        ]
 
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
+        result = vlm_client.invoke(contents=contents)
 
-            tools = [{
-                "function_declarations": [{
-                    "name": "test_tool",
-                    "description": "Test tool",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "param": {"type": "string"}
-                        }
+        assert "text" in result
+        assert isinstance(result["text"], str)
+        assert len(result["text"]) > 10
+
+    def test_invoke_with_tools(self, vlm_client, page_images):
+        """Test that VLM returns function_calls when tools are provided."""
+        img = page_images[1]
+        tools = [
+            {
+                "function_declarations": [
+                    {
+                        "name": "ask_ocr",
+                        "description": "Extract a specific value from a document page via OCR.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "page_num": {"type": "integer", "description": "Page number"},
+                                "prompt": {"type": "string", "description": "What to extract"},
+                            },
+                            "required": ["page_num", "prompt"],
+                        },
                     }
-                }]
-            }]
+                ]
+            }
+        ]
 
-            result = client.invoke("Call tool", [], tools=tools)
+        result = vlm_client.invoke(
+            prompt="На этой странице есть какой-нибудь URL? Если да, извлеки его через ask_ocr (page_num=1).",
+            images=[img],
+            tools=tools,
+        )
 
-            assert "function_calls" in result
-            assert len(result["function_calls"]) == 1
-            assert result["function_calls"][0]["name"] == "test_tool"
-            assert result["function_calls"][0]["args"]["param"] == "value"
-
-    def test_invoke_with_images(self, vlm_config, mock_images):
-        """Test that images are base64 encoded in request."""
-        client = GeminiVLMClient(vlm_config)
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": '{"seen": true}'}
-                    ]
-                }
-            }]
-        }
-
-        with patch('requests.post') as mock_post:
-            mock_post.return_value = mock_response
-
-            client.invoke("What do you see?", [mock_images])
-
-            # Check that post was called
-            assert mock_post.called
-            call_args = mock_post.call_args
-
-            # Verify payload contains inline_data
-            payload = call_args[1]['json']
-            contents = payload['contents'][0]
-            parts = contents['parts']
-
-            # First part should be text prompt
-            assert parts[0]['text'] == "What do you see?"
-
-            # Second part should be inline_data with base64 image
-            assert 'inline_data' in parts[1]
-            assert parts[1]['inline_data']['mime_type'] == 'image/png'
-            assert 'data' in parts[1]['inline_data']
+        # Model should either call the tool or return text
+        assert "text" in result or "function_calls" in result

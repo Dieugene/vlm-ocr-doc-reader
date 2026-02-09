@@ -23,16 +23,19 @@ class BaseVLMClient:
 
     def invoke(
         self,
-        prompt: str,
-        images: List[bytes],
-        tools: Optional[List[Dict]] = None
+        prompt: str = "",
+        images: Optional[List[bytes]] = None,
+        tools: Optional[List[Dict]] = None,
+        contents: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
-        """Invoke VLM with prompt and images.
+        """Invoke VLM with prompt and images, or with full conversation history.
 
         Args:
-            prompt: Text prompt
-            images: List of images (PNG bytes)
+            prompt: Text prompt (used when contents is None)
+            images: List of images (PNG bytes) (used when contents is None)
             tools: Optional tool definitions for function calling
+            contents: Full conversation history in Gemini format.
+                      If provided, prompt and images are ignored.
 
         Returns:
             With tools: {"function_calls": [...], "text": Optional[str]}
@@ -181,16 +184,19 @@ class GeminiVLMClient(BaseVLMClient):
 
     def invoke(
         self,
-        prompt: str,
-        images: List[bytes],
-        tools: Optional[List[Dict]] = None
+        prompt: str = "",
+        images: Optional[List[bytes]] = None,
+        tools: Optional[List[Dict]] = None,
+        contents: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
-        """Invoke VLM with prompt and images.
+        """Invoke VLM with prompt and images, or with full conversation history.
 
         Args:
-            prompt: Text prompt
-            images: List of images (PNG bytes)
+            prompt: Text prompt (used when contents is None)
+            images: List of images (PNG bytes) (used when contents is None)
             tools: Optional tool definitions for function calling
+            contents: Full conversation history in Gemini format.
+                      If provided, prompt and images are ignored.
 
         Returns:
             With tools: {"function_calls": [...], "text": Optional[str]}
@@ -199,36 +205,51 @@ class GeminiVLMClient(BaseVLMClient):
         # Apply throttling
         self._throttle()
 
-        # Build message parts
-        parts = [{"text": prompt}]
+        if images is None:
+            images = []
 
-        for img_bytes in images:
-            b64_data = base64.b64encode(img_bytes).decode('utf-8')
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": b64_data
-                }
-            })
+        if contents is not None:
+            # Use full conversation history directly
+            payload: Dict[str, Any] = {
+                "contents": contents
+            }
+        else:
+            # Build message parts from prompt + images (legacy path)
+            parts = [{"text": prompt}]
 
-        # Build payload
-        payload: Dict[str, Any] = {
-            "contents": [{
-                "parts": parts
-            }]
-        }
+            for img_bytes in images:
+                b64_data = base64.b64encode(img_bytes).decode('utf-8')
+                parts.append({
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": b64_data
+                    }
+                })
+
+            payload = {
+                "contents": [{
+                    "parts": parts
+                }]
+            }
 
         # Add tools if provided
         if tools:
             payload["tools"] = tools
-        # No JSON mode for simple prompts - return plain text
 
         headers = {'Content-Type': 'application/json'}
 
-        logger.info(
-            f"Sending request to Gemini {self.config.model} "
-            f"with {len(images)} images, tools={'yes' if tools else 'no'}"
-        )
+        if contents is not None:
+            logger.info(
+                f"Sending request to Gemini {self.config.model} "
+                f"with {len(contents)} messages, "
+                f"tools={'yes' if tools else 'no'}, contents=yes"
+            )
+        else:
+            logger.info(
+                f"Sending request to Gemini {self.config.model} "
+                f"with {len(images)} images, "
+                f"tools={'yes' if tools else 'no'}, contents=no"
+            )
 
         # Make request with retry
         start_ts = time.monotonic()

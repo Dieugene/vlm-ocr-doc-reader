@@ -74,7 +74,7 @@ class BaseOCRClient(ABC):
         Returns:
             {
                 "status": "ok" | "no_data" | "error",
-                "value": str,  # Extracted value (digits only)
+                "value": str,  # Extracted value (as-is from document)
                 "context": str,  # Text fragment where found
                 "explanation": str  # Reasoning
             }
@@ -126,7 +126,7 @@ class QwenOCRClient(BaseOCRClient):
         Returns:
             Parsed response with status/value/context/explanation
         """
-        value_match = re.search(r"ЗНАЧЕНИЕ:\s*(\S+)", response_text)
+        value_match = re.search(r"ЗНАЧЕНИЕ:\s*(.+?)(?=\nКОНТЕКСТ:|\nПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
         context_match = re.search(r"КОНТЕКСТ:\s*(.+?)(?=\nПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
         explanation_match = re.search(r"ПОЯСНЕНИЕ:\s*(.+)", response_text, re.DOTALL)
 
@@ -134,25 +134,13 @@ class QwenOCRClient(BaseOCRClient):
         context = context_match.group(1).strip() if context_match else ""
         explanation = explanation_match.group(1).strip() if explanation_match else ""
 
-        # Normalize value: extract digits only
-        if value_raw.upper() == "НЕТ" or value_raw == "-":
-            value = ""
+        # Return raw value - normalization should be optional/controlled by caller
+        if value_raw.upper() == "НЕТ" or value_raw == "-" or not value_raw:
             status = "no_data"
+            value = ""
         else:
-            # Extract only digits
-            value = re.sub(r"[^\d]", "", value_raw)
-            status = "ok" if value else "no_data"
-
-        # Fallback: if nothing parsed, try to find any digits in response
-        if not value and not context and not explanation:
-            digits_only = re.sub(r"[^\d]", "", response_text)
-            if len(digits_only) >= 10:  # Minimum length for OGRN/ORNZ
-                return {
-                    "status": "ok",
-                    "value": digits_only,
-                    "context": "",
-                    "explanation": "fallback: extracted digits from raw response",
-                }
+            status = "ok"
+            value = value_raw
 
         return {
             "status": status,
@@ -196,19 +184,28 @@ class QwenOCRClient(BaseOCRClient):
                     {
                         "type": "text",
                         "text": (
-                            "Ты точный OCR-помощник для извлечения числовых идентификаторов из документов.\n\n"
+                            "Ты точный OCR-помощник. Твоя задача - извлечь конкретное значение из изображения документа.\n\n"
                             "ФОРМАТ ОТВЕТА (строго соблюдай):\n"
-                            "ЗНАЧЕНИЕ: <только цифры без пробелов, или НЕТ если не найдено>\n"
-                            "КОНТЕКСТ: <фрагмент текста с извлечённым числом>\n"
-                            "ПОЯСНЕНИЕ: <краткое объяснение, где искал и что нашёл/не нашёл>\n\n"
-                            "ПРИМЕР УСПЕШНОГО ОТВЕТА:\n"
-                            "ЗНАЧЕНИЕ: 22006042705\n"
-                            "КОНТЕКСТ: Руководитель аудита, по результатам которого составлено аудиторское заключение (ОРНЗ 22006042705)\n"
-                            "ПОЯСНЕНИЕ: Нашёл после фразы 'составлено аудиторское заключение' в центральной части\n\n"
-                            "ПРИМЕР ПРИ ОТСУТСТВИИ ДАННЫХ:\n"
+                            "ЗНАЧЕНИЕ: <извлечённое значение целиком, или НЕТ если не найдено>\n"
+                            "КОНТЕКСТ: <фрагмент текста вокруг найденного значения>\n"
+                            "ПОЯСНЕНИЕ: <где искал и что нашёл/не нашёл>\n\n"
+                            "ПРАВИЛА:\n"
+                            "- Возвращай значение ТОЧНО как в документе, не изменяй и не сокращай\n"
+                            "- URL возвращай полностью, включая протокол и весь путь\n"
+                            "- Числа, ФИО, адреса - точно как написано\n"
+                            "- Если значение не найдено, ЗНАЧЕНИЕ: НЕТ\n\n"
+                            "ПРИМЕР (URL):\n"
+                            "ЗНАЧЕНИЕ: https://example.com/path/to/page\n"
+                            "КОНТЕКСТ: См. подробнее: https://example.com/path/to/page (раздел 3)\n"
+                            "ПОЯСНЕНИЕ: Нашёл URL в нижней части страницы после слова 'подробнее'\n\n"
+                            "ПРИМЕР (ID):\n"
+                            "ЗНАЧЕНИЕ: 1234567890123\n"
+                            "КОНТЕКСТ: ОГРН: 1234567890123\n"
+                            "ПОЯСНЕНИЕ: Нашёл после метки 'ОГРН:' в шапке документа\n\n"
+                            "ПРИМЕР (не найдено):\n"
                             "ЗНАЧЕНИЕ: НЕТ\n"
                             "КОНТЕКСТ: -\n"
-                            "ПОЯСНЕНИЕ: Искал номер после 'ОГРН:' в указанном блоке, но такого текста не нашёл на странице"
+                            "ПОЯСНЕНИЕ: Искал на странице, но указанные данные отсутствуют"
                         ),
                     }
                 ],
@@ -230,7 +227,6 @@ class QwenOCRClient(BaseOCRClient):
             "messages": messages,
             "temperature": 0.0,
             "top_p": 0.9,
-            "max_tokens": 200,
         }
 
         headers = {
@@ -293,8 +289,9 @@ class QwenOCRClient(BaseOCRClient):
 
                 result = self._parse_qwen_response(response_text)
                 logger.info(
-                    f"Qwen API success: page={page_num}, status={result['status']}, "
-                    f"latency={latency_ms}ms, value_length={len(result['value'])}"
+                    f"Qwen OCR page={page_num} | prompt='{prompt}' | "
+                    f"status={result['status']} | value='{result['value']}' | "
+                    f"context='{result['context']}' | latency={latency_ms}ms"
                 )
                 return result
 

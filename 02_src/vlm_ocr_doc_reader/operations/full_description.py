@@ -11,10 +11,40 @@ from ..schemas.document import DocumentData, HeaderInfo
 logger = logging.getLogger(__name__)
 
 # VLM prompts
-PROMPT_TEXT = (
-    "Верни весь текст с этих страниц в формате plain text. "
-    "Сохраняй структуру заголовков."
-)
+PROMPT_TEXT = """
+Ты анализируешь страницы документа. Работай в три прохода.
+
+## НУМЕРАЦИЯ СТРАНИЦ
+Каждая страница маркирована в верхнем левом углу: [G1], [G2], [G3] и т.д.
+Эти маркеры — точные идентификаторы страниц.
+При вызове ask_ocr используй ЧИСЛО ИЗ МАРКИРОВКИ как page_num.
+Пример: видишь маркер [G5] -> вызывай ask_ocr(page_num=5, ...).
+
+## ПРОХОД 1 — Извлечение текста
+Прочитай ВСЕ страницы и извлеки ПОЛНЫЙ текст: заголовки, параграфы, списки, таблицы.
+Делай это сам, по изображениям — НЕ вызывай OCR для общего текста.
+
+## ПРОХОД 2 — Реестр OCR-сущностей
+Просмотри извлечённый текст и составь список precision-critical данных, которые ты мог прочитать неточно:
+- URL и email-адреса
+- Идентификаторы: ОГРН, ИНН, КПП, СНИЛС, номера документов
+- ФИО (точное написание)
+- Телефоны, почтовые адреса
+- Коды, артикулы, номера счетов
+
+Для каждого такого значения запомни: на какой оно странице (по маркеру [G{N}]) и какой ориентир рядом (текст до/после).
+
+## ПРОХОД 3 — OCR-верификация
+Вызови ask_ocr для КАЖДОГО значения из реестра, группируя по страницам.
+Формат вызова: ask_ocr(page_num=N, prompt="найди <что именно>, ориентир: <текст рядом>")
+
+После получения OCR-результатов — ПОДСТАВЬ их вместо своих значений.
+OCR-результат ВСЕГДА в приоритете над твоим прочтением.
+
+## Формат финального ответа
+Верни ПОЛНЫЙ текст документа в plain text, сохраняя структуру (заголовки, списки, абзацы).
+Все precision-critical значения должны быть из OCR.
+"""
 
 PROMPT_STRUCTURE = """
 Проанализируй эти страницы и опиши иерархическую структуру документа.
@@ -84,13 +114,13 @@ class FullDescriptionOperation(BaseOperation):
         # Extract images
         images = self._extract_images(filtered_pages)
 
-        # Call VLM for text extraction
+        # Call VLM for text extraction (pass page info for context)
         logger.info("Calling VLM for text extraction")
-        text = self._extract_text(images)
+        text = self._extract_text(filtered_pages, images)
 
-        # Call VLM for structure extraction
+        # Call VLM for structure extraction (pass page info for context)
         logger.info("Calling VLM for structure extraction")
-        structure = self._extract_structure(images)
+        structure = self._extract_structure(filtered_pages, images)
 
         # Return DocumentData (tables empty in v0.1.0)
         result = DocumentData(
@@ -170,18 +200,27 @@ class FullDescriptionOperation(BaseOperation):
                 raise ValueError(f"Unsupported page type: {type(page)}")
         return images
 
-    def _extract_text(self, images: List[bytes]) -> str:
+    def _extract_text(self, pages: List[Any], images: List[bytes]) -> str:
         """Extract text from images using VLM.
 
         Args:
+            pages: List of pages (PageInfo objects with page numbers)
             images: List of page images
 
         Returns:
             Extracted text
         """
+        # Build prompt with page information
+        page_info = ""
+        if pages and hasattr(pages[0], 'index'):
+            page_numbers = [p.index for p in pages]
+            page_info = f"\nНомера страниц: {page_numbers}\nИспользуй OCR tool указывая точный номер страницы."
+
+        enhanced_prompt = PROMPT_TEXT + page_info
+
         # Call VLM agent via processor
         vlm_agent = self._get_vlm_agent()
-        response = vlm_agent.invoke(PROMPT_TEXT, images)
+        response = vlm_agent.invoke(enhanced_prompt, images)
 
         # Extract text from response
         if isinstance(response, dict):
@@ -192,43 +231,58 @@ class FullDescriptionOperation(BaseOperation):
             logger.warning(f"Unexpected VLM response type: {type(response)}")
             return str(response)
 
-    def _extract_structure(self, images: List[bytes]) -> Dict[str, Any]:
+    def _extract_structure(self, pages: List[Any], images: List[bytes]) -> Dict[str, Any]:
         """Extract document structure using VLM.
 
         Args:
+            pages: List of pages (PageInfo objects with page numbers)
             images: List of page images
 
         Returns:
             Structure dict with "headers" key
         """
-        # Call VLM agent via processor
-        vlm_agent = self._get_vlm_agent()
-        response = vlm_agent.invoke(PROMPT_STRUCTURE, images)
+        try:
+            # Build prompt with page information
+            page_info = ""
+            if pages and hasattr(pages[0], 'index'):
+                page_numbers = [p.index for p in pages]
+                page_info = f"\nНомера страниц: {page_numbers}"
 
-        # Parse JSON response
-        text = self._extract_response_text(response)
-        structure = self._parse_structure_response(text)
+            enhanced_prompt = PROMPT_STRUCTURE + page_info
 
-        logger.info(
-            f"Parsed structure: {len(structure.get('headers', []))} headers found"
-        )
+            # Call VLM agent via processor
+            vlm_agent = self._get_vlm_agent()
+            response = vlm_agent.invoke(enhanced_prompt, images)
 
-        return structure
+            # Parse JSON response
+            text = self._extract_response_text(response)
+
+            if not text:
+                logger.warning("Empty response from VLM for structure extraction")
+                return {"headers": []}
+
+            structure = self._parse_structure_response(text)
+
+            logger.info(
+                f"Parsed structure: {len(structure.get('headers', []))} headers found"
+            )
+
+            return structure
+        except Exception as e:
+            logger.error(f"Error extracting structure: {e}")
+            return {"headers": []}
 
     def _get_vlm_agent(self) -> Any:
-        """Get VLM client/agent from processor.
+        """Get VLM agent from processor.
 
         Returns:
-            VLM client with invoke(prompt, images) method
+            VLM agent with invoke(prompt, images) method
         """
-        # Support both vlm_client (real implementation) and vlm_agent (mock for testing)
-        if hasattr(self.processor, 'vlm_client'):
-            return self.processor.vlm_client
-        elif hasattr(self.processor, 'vlm_agent'):
+        if hasattr(self.processor, 'vlm_agent'):
             return self.processor.vlm_agent
         else:
             raise RuntimeError(
-                "DocumentProcessor must have 'vlm_client' or 'vlm_agent' attribute"
+                "DocumentProcessor must have 'vlm_agent' attribute"
             )
 
     def _extract_response_text(self, response: Any) -> str:

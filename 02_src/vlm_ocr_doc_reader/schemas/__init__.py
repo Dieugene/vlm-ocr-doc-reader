@@ -2,7 +2,7 @@
 
 from .document import DocumentData, HeaderInfo, TableInfo
 from .common import PageInfo, ClusterInfo, TriageResult
-from .config import VLMConfig, ProcessorConfig
+from .config import VLMConfig, ProcessorConfig, OCRConfig
 
 __all__ = [
     "DocumentData",
@@ -13,4 +13,5 @@ __all__ = [
     "TriageResult",
     "VLMConfig",
     "ProcessorConfig",
+    "OCRConfig",
 ]
