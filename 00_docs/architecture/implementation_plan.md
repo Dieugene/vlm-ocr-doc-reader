@@ -1,22 +1,15 @@
 # Implementation Plan: vlm-ocr-doc-reader
 
-**Версия:** 3.0
+**Версия:** 4.0
 **Дата:** 2026-02-20
 **Автор:** Tech Lead
-**Статус:** Фаза 1 завершена, Фаза 2 — эскалация к Architect
+**Статус:** Фаза 1 завершена, Фаза 2 — планирование задач (ADR 001 принят)
 
 ---
 
 ## Цель
 
-Универсальный переиспользуемый Python-пакет для работы с документами через Vision Language Models (VLM) и OCR.
-
-**Ключевые требования:**
-- Контракт с проектом `07_agentic-doc-processing` через `FullDescriptionOperation`
-- Гибридный подход: VLM для понимания контекста + OCR для точности
-- Поддержка PDF файлов и массивов PNG как входных данных
-- State management для разработки и тестирования
-- Operations-based подход (только через `.execute()`)
+Универсальный переиспользуемый Python-пакет для работы с документами через VLM и OCR.
 
 ---
 
@@ -33,144 +26,99 @@
 | 5. Критические баги | JSON mode, VLMAgent, OCR Tool | Выполнена |
 | 6. pyproject.toml | Пакетирование, entry points | Выполнена |
 | 7. CLI интерфейс | cli.py, argparse, logging | Выполнена |
+| 8. Рефакторинг | Parallel OCR, conversation history, three-pass | Выполнена |
 
-### Архитектура (фактическая)
+### Архитектура v0.1.0 (фактическая)
 
 ```
-CLI (cli.py)
- └→ FullDescriptionOperation
-     └→ DocumentProcessor
-         ├── StateManager (Memory/Disk)
-         ├── PDFRenderer ([G{N}] markers, DPI 150)
-         └── VLMAgent (max_iterations=100, max_tool_workers=5)
-             ├── GeminiVLMClient (gemini-2.5-flash, contents=messages)
-             └── ask_ocr tool → OCRTool(state_manager) → QwenOCRClient (qwen-vl-plus)
+CLI → FullDescriptionOperation → DocumentProcessor → VLMAgent
+                                                       ├── GeminiVLMClient (contents=messages)
+                                                       └── ask_ocr → OCRTool(state_manager) → QwenOCRClient
 ```
 
-### Ключевые отличия от первоначального плана
-
-**1. VLM Agent — conversation history (не было в плане v1/v2):**
-- VLM Client принимает `contents` — полная история диалога Gemini
-- VLM Agent передает `contents=self.messages` вместо single prompt
-- Позволяет multi-turn dialogue и three-pass OCR стратегию
-
-**2. OCRTool — самостоятельное получение изображений (рефакторинг 2026-02-09):**
-- OCRTool принимает `state_manager` в конструкторе
-- При вызове `execute(page_num, prompt)` сам загружает image из storage
-- VLM Agent не управляет изображениями — только передает page_num
-
-**3. Three-pass OCR стратегия (не было в плане v1/v2):**
-- Проход 1: VLM читает весь текст со страниц самостоятельно
-- Проход 2: VLM строит реестр OCR-сущностей (URLs, IDs, имена, телефоны)
-- Проход 3: VLM вызывает ask_ocr для каждой сущности, подставляет результаты
-
-**4. Параллельное выполнение tool calls (не было в плане v1/v2):**
-- ThreadPoolExecutor(max_workers=5) в VLMAgent._execute_tool_calls()
-- pool.map() сохраняет порядок результатов
-- Gemini батчит вызовы недетерминированно (1/16/29/30 за итерацию)
-- С параллелизацией: ~4x ускорение OCR
-
-**5. Маркеры страниц [G{N}]:**
-- PDFRenderer штампует `[G1]`, `[G2]` в верхнем левом углу
-- VLM видит маркер → знает какой page_num передать в ask_ocr
-
-**6. max_iterations увеличен до 100 (было 10):**
-- При 66 OCR-вызовах и Gemini batching 1-per-iter нужен запас
-
-### Интерфейсы (фактические)
-
-#### ProcessorConfig
-```python
-@dataclass
-class ProcessorConfig:
-    state_dir: Optional[Path] = None
-    auto_save: bool = True
-    render_dpi: int = 150
-    log_level: str = "INFO"
-    max_tool_workers: int = 5       # Параллельных OCR workers
-    max_iterations: int = 100       # Итераций tool calling loop
-```
-
-#### VLMAgent.invoke()
-```python
-def invoke(self, prompt: str, images: List[bytes]) -> Dict[str, Any]:
-    # Добавляет prompt+images в self.messages
-    # Вызывает VLM с contents=self.messages (полная история)
-    # Tool calling loop: execute → collect results → repeat
-    # ThreadPoolExecutor для параллельных tool calls
-```
-
-#### OCRTool.execute()
-```python
-def execute(self, page_num: int, prompt: str) -> Dict[str, Any]:
-    # Сам загружает image из StateManager по page_num
-    # Вызывает ocr_client.extract(image, prompt, page_num)
-    # Возвращает {"status": "ok", "value": "...", "context": "...", "explanation": "..."}
-```
+Ключевые параметры: max_iterations=100, max_tool_workers=5, DPI=150.
 
 ### Результаты тестирования
-
-Тестовый документ: `03_data/test_document.pdf` (8 страниц, ASX free float analysis)
 
 | Запуск | Время | OCR calls | Parallel | Headers | Полный текст |
 |--------|-------|-----------|----------|---------|-------------|
 | run_174559 | 12 мин | 66 | Нет | 48 | Да |
-| run_191547 | 2 мин | 0 | — | 56 | Нет (text=None) |
-| run_192010 | 7 мин | 10 | Да (5w) | 49 | Нет (max_iter=10) |
 | run_193215 | 6 мин | 65 | Да (5w) | 58 | Да |
 
-**Вывод:** Parallel + max_iterations=100 = лучший результат (6 мин, 58 headers).
-
 ---
 
-## Фаза 2: Оптимизация OCR (В ПЛАНИРОВАНИИ)
+## Фаза 2: v0.2.0 — Resolution Levels (ПЛАНИРОВАНИЕ)
 
-### Задача 008 — рефакторинг (ЗАВЕРШЕНА 2026-02-09)
+**Основание:** ADR 001 (`decision_001_resolution_levels.md`)
 
-Полный список изменений см. в `backlog.md` задача 008.
+### Суть изменений
 
-### Задача 009 — Page-based OCR batching (ЭСКАЛАЦИЯ К ARCHITECT)
+Текущий монолитный подход (VLM делает всё за один invoke) заменяется поэтапной обработкой:
 
-**Проблема:** 66 отдельных ask_ocr вызовов → 66 отдельных Qwen API requests.
-Даже с 5 параллельными воркерами, OCR занимает 3-5 минут.
+1. **Scan** (Level 0) — VLM читает текст, строит OCR Registry. OCR не вызывается.
+2. **Resolve** (Level 1) — OCR выполняется по Registry. VLM не участвует.
+3. **Verify** (Level 2) — N параллельных OCR-вызовов, majority voting. Только интерфейс в v0.2.0.
 
-**Целевая оптимизация:** Группировать запросы по page_num и отправлять один объединённый запрос на страницу.
+**DocumentReader** — новый публичный API. CLI, программный API, интеграция с проектом 07 — всё через него.
 
-**Требует архитектурного решения:** Формат объединённого промпта, парсинг ответа, обработка ошибок, режим сравнения V1/V2.
+**Workspace** — директория `{stem}_{content_hash6}/` для персистенции состояния.
 
-**Подробности:** `00_docs/architecture/_questions_architect.md`
+### Структура задач Фазы 2
 
----
+| ID | Задача | Зависимости | Приоритет |
+|----|--------|-------------|-----------|
+| 009 | DocumentState + OCR Registry | — | High |
+| 010 | Workspace (DiskStorage рефакторинг) | 009 | High |
+| 011 | DocumentReader (публичный API) | 009, 010 | High |
+| 012 | Scan — refactor Prompt, VLM возвращает Registry | 009, 011 | High |
+| 013 | Resolve — OCR без VLM, page-based batching | 009, 011 | High |
+| 014 | CLI v2 (scan/resolve/verify/full-description) | 011 | Medium |
+| 015 | Verify — интерфейс (реализация стратегии отложена) | 013 | Low |
 
-## Зависимости между фазами
+### Зависимости
 
 ```mermaid
 graph TD
-    subgraph "Фаза 1 — v0.1.0 (DONE)"
-        Z1[001: Base utilities] --> Z2[002: VLM processing]
-        Z1 --> Z3[003: OCR support]
-        Z2 --> Z4[004: Operations]
-        Z2 --> Z5[005: Bug fixes]
-        Z3 --> Z5
-        Z5 --> Z6[006: pyproject.toml]
-        Z5 --> Z7[007: CLI]
-    end
+    Z9[009: DocumentState + OCR Registry] --> Z11[011: DocumentReader]
+    Z10[010: Workspace] --> Z11
+    Z11 --> Z12[012: Scan]
+    Z11 --> Z13[013: Resolve]
+    Z11 --> Z14[014: CLI v2]
+    Z13 --> Z15[015: Verify интерфейс]
 
-    subgraph "Фаза 2 — Оптимизация"
-        Z7 --> Z8[008: Рефакторинг]
-        Z8 --> Z9[009: OCR batching]
-    end
-
-    style Z1 fill:#9f9
-    style Z2 fill:#9f9
-    style Z3 fill:#9f9
-    style Z4 fill:#9f9
-    style Z5 fill:#9f9
-    style Z6 fill:#9f9
-    style Z7 fill:#9f9
-    style Z8 fill:#9f9
-    style Z9 fill:#ff9,stroke:#333,stroke-width:3px
+    style Z9 fill:#ff9
+    style Z10 fill:#ff9
+    style Z11 fill:#f9f,stroke:#333,stroke-width:3px
+    style Z12 fill:#ff9
+    style Z13 fill:#ff9
+    style Z14 fill:#9cf
+    style Z15 fill:#ddd
 ```
+
+### Параллельность
+
+- **009 и 010** можно запускать параллельно (минимум зависимостей)
+- **012 и 013** можно запускать параллельно после 011
+- **015** откладывается (только интерфейс)
+
+### Критический путь
+
+009 → 011 → 012 + 013 → 014
+
+### Что переиспользуется из v0.1.0
+
+- **VLMAgent, VLMClient** — без изменений (используется при Scan)
+- **OCRClient** — без изменений (используется при Resolve напрямую)
+- **PDFRenderer** — без изменений ([G{N}] markers)
+- **StateManager** — расширяется (OCR Registry, page states)
+- **OCRTool** — сохраняется для обратной совместимости Scan (VLM может вызывать ask_ocr)
+
+### Что меняется
+
+- **full_description.py** — PROMPT_TEXT разделяется: Scan-промпт возвращает текст + Registry как структурированные данные (не через tool calling)
+- **DocumentProcessor** — подчиняется DocumentReader, используется только при Scan
+- **CLI** — субкоманды вместо единого entry point
+- **Новые компоненты:** DocumentReader, DocumentState, OCRRegistry, Workspace
 
 ---
 
@@ -178,6 +126,7 @@ graph TD
 
 | Дата | Версия | Изменения | Автор |
 |------|--------|-----------|-------|
-| 2026-02-20 | 3.0 | Актуализация: фиксация фактической архитектуры (conversation history, parallel OCR, three-pass), добавлена Фаза 2, результаты тестирования | Tech Lead |
-| 2026-01-27 | 2.0 | Переписан с учетом отзывов (4 задачи, invoke(), без Page Batching) | Tech Lead |
+| 2026-02-20 | 4.0 | Фаза 2 переосмыслена по ADR 001: Resolution Levels, задачи 009-015 | Tech Lead |
+| 2026-02-20 | 3.0 | Фиксация фактической архитектуры v0.1.0, результаты тестирования | Tech Lead |
+| 2026-01-27 | 2.0 | 4 задачи, invoke(), без Page Batching | Tech Lead |
 | 2026-01-27 | 1.0 | Первый черновик | Tech Lead |
