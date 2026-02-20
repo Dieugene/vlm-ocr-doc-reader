@@ -42,3 +42,5 @@ class ProcessorConfig:
     auto_save: bool = True
     render_dpi: int = 150
     log_level: str = "INFO"
+    max_tool_workers: int = 5
+    max_iterations: int = 100

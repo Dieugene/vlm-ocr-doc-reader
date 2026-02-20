@@ -2,7 +2,8 @@
 
 import base64
 import logging
-from typing import Dict, List, Any, Callable, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from .vlm_client import BaseVLMClient
 
@@ -22,16 +23,19 @@ class VLMAgent:
     def __init__(
         self,
         vlm_client: BaseVLMClient,
-        max_iterations: int = 10
+        max_iterations: int = 10,
+        max_tool_workers: int = 1,
     ):
         """Initialize VLM Agent.
 
         Args:
             vlm_client: VLM client instance
             max_iterations: Maximum number of tool calling iterations
+            max_tool_workers: Max parallel threads for tool execution (1 = sequential)
         """
         self.vlm_client = vlm_client
         self.max_iterations = max_iterations
+        self.max_tool_workers = max_tool_workers
         self.messages: List[Dict] = []
         self.tools: Dict[str, Callable] = {}  # tool_name -> handler
         self.tool_definitions: List[Dict] = []  # Tool definitions for VLM
@@ -158,31 +162,13 @@ class VLMAgent:
                     "parts": model_parts
                 })
 
-                # Execute all function calls
+                # Execute all function calls (parallel if max_tool_workers > 1)
+                ordered_results = self._execute_tool_calls(function_calls)
+
                 function_responses = []
-                for fc in function_calls:
+                for fc, result in ordered_results:
                     func_name = fc["name"]
                     func_args = fc.get("args", {})
-
-                    logger.info(f"Tool call: {func_name}({func_args})")
-
-                    if func_name not in self.tools:
-                        error_msg = f"Unknown tool: {func_name}"
-                        logger.error(error_msg)
-                        result = {"error": error_msg, "status": "error"}
-                    else:
-                        try:
-                            handler = self.tools[func_name]
-                            result = handler(**func_args)
-                            logger.info(
-                                f"Tool result: {func_name} -> "
-                                f"status={result.get('status', '?')} | "
-                                f"value='{result.get('value', '')}'"
-                            )
-                        except Exception as e:
-                            error_msg = f"Tool {func_name} failed: {e}"
-                            logger.exception(error_msg)
-                            result = {"error": error_msg, "status": "error"}
 
                     function_results.append({
                         "name": func_name,
@@ -190,7 +176,6 @@ class VLMAgent:
                         "result": result
                     })
 
-                    # Add function response to messages
                     function_responses.append({
                         "functionResponse": {
                             "name": func_name,
@@ -240,3 +225,47 @@ class VLMAgent:
             "error": error_msg,
             "function_results": function_results
         }
+
+    def _execute_tool_calls(
+        self, function_calls: List[Dict]
+    ) -> List[Tuple[Dict, Dict]]:
+        """Execute tool calls, parallel when max_tool_workers > 1.
+
+        Uses ThreadPoolExecutor for parallel execution.
+        pool.map preserves original order of results.
+
+        Args:
+            function_calls: List of function call dicts from Gemini
+
+        Returns:
+            List of (fc, result) tuples in ORIGINAL order
+        """
+        def run_one(fc: Dict) -> Tuple[Dict, Dict]:
+            func_name = fc["name"]
+            func_args = fc.get("args", {})
+            logger.info(f"Tool call: {func_name}({func_args})")
+
+            if func_name not in self.tools:
+                error_msg = f"Unknown tool: {func_name}"
+                logger.error(error_msg)
+                return fc, {"error": error_msg, "status": "error"}
+
+            try:
+                result = self.tools[func_name](**func_args)
+                logger.info(
+                    f"Tool result: {func_name} -> "
+                    f"status={result.get('status', '?')} | "
+                    f"value='{result.get('value', '')}'"
+                )
+                return fc, result
+            except Exception as e:
+                error_msg = f"Tool {func_name} failed: {e}"
+                logger.exception(error_msg)
+                return fc, {"error": error_msg, "status": "error"}
+
+        if self.max_tool_workers <= 1:
+            return [run_one(fc) for fc in function_calls]
+
+        logger.info(f"Executing {len(function_calls)} tool calls with {self.max_tool_workers} workers")
+        with ThreadPoolExecutor(max_workers=self.max_tool_workers) as pool:
+            return list(pool.map(run_one, function_calls))

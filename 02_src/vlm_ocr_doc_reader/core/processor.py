@@ -98,7 +98,11 @@ class DocumentProcessor:
                 )
 
             # Create VLM agent and register OCR tool if available
-            vlm_agent = VLMAgent(vlm_client)
+            vlm_agent = VLMAgent(
+                vlm_client,
+                max_iterations=self.config.max_iterations,
+                max_tool_workers=self.config.max_tool_workers,
+            )
 
             if ocr_tool:
                 vlm_agent.register_tool(ocr_tool.to_tool_definition(), ocr_tool.execute)

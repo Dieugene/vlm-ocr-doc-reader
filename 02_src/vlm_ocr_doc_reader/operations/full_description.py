@@ -224,7 +224,7 @@ class FullDescriptionOperation(BaseOperation):
 
         # Extract text from response
         if isinstance(response, dict):
-            return response.get("text", "")
+            return response.get("text") or ""
         elif isinstance(response, str):
             return response
         else:

@@ -142,6 +142,20 @@ Each run creates a timestamped subdirectory inside --output-dir:
         help="Logging level (default: INFO)",
     )
 
+    parser.add_argument(
+        "--max-tool-workers",
+        type=int,
+        default=5,
+        help="Max parallel OCR workers per tool batch (default: 5)",
+    )
+
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=100,
+        help="Max tool calling iterations per VLM invoke (default: 100)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -170,6 +184,8 @@ Each run creates a timestamped subdirectory inside --output-dir:
             auto_save=True,
             render_dpi=args.dpi,
             log_level=args.log_level,
+            max_tool_workers=args.max_tool_workers,
+            max_iterations=args.max_iterations,
         )
 
         logger.info("Initializing DocumentProcessor...")
@@ -202,7 +218,7 @@ Each run creates a timestamped subdirectory inside --output-dir:
         print("=" * 60)
         print(f"Run directory:   {run_dir}")
         print(f"Pages processed: {processor.num_pages}")
-        print(f"Text length:     {len(result.text)} characters")
+        print(f"Text length:     {len(result.text or '')} characters")
         print(f"Headers found:   {len(result.structure.get('headers', []))}")
         print(f"Results:         {result_path}")
         print(f"Log:             {log_file}")

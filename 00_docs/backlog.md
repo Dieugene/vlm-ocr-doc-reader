@@ -1,7 +1,7 @@
 # Backlog: vlm-ocr-doc-reader
 
-**Версия:** 3.0
-**Дата:** 2025-01-27
+**Версия:** 4.0
+**Дата:** 2026-02-20
 **Владелец:** Tech Lead
 
 ---
@@ -10,187 +10,60 @@
 
 | ID | Название | Приоритет | Статус | Дата начала | Дата завершения | Зависимости |
 |----|----------|-----------|--------|-------------|-----------------|-------------|
-| 001 | Base utilities (PDF Renderer, OCR нормализация, State Manager) | High | Выполнена | 2025-01-27 | 2025-01-27 | Нет |
-| 002 | VLM processing (VLM Client, VLM Agent, DocumentProcessor) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
-| 003 | OCR support (OCR Client, OCR Tool) | Medium | Выполнена | 2025-01-27 | 2025-01-27 | Задача 001 |
-| 004 | High-level operations (FullDescriptionOperation) | High | Выполнена | 2025-01-27 | 2025-01-27 | Задача 002 |
-| 005 | Критические баги (JSON mode, VLMAgent, OCR Tool) | Critical | Выполнена | 2025-01-27 | 2025-01-28 | Задачи 001-004 |
-| 006 | pyproject.toml и подготовка к публикации (GitHub) | High | Выполнена | 2025-01-28 | 2025-01-28 | Нет |
-| 007 | CLI интерфейс для распознавания документов | High | Выполнена | 2025-01-28 | 2025-01-28 | Нет |
-| 007 | CLI интерфейс для распознавания документов | High | Не начата | - | - | Нет |
+| 001 | Base utilities (PDF Renderer, OCR нормализация, State Manager) | High | Выполнена | 2026-01-27 | 2026-01-27 | Нет |
+| 002 | VLM processing (VLM Client, VLM Agent, DocumentProcessor) | High | Выполнена | 2026-01-27 | 2026-01-27 | Задача 001 |
+| 003 | OCR support (OCR Client, OCR Tool) | Medium | Выполнена | 2026-01-27 | 2026-01-27 | Задача 001 |
+| 004 | High-level operations (FullDescriptionOperation) | High | Выполнена | 2026-01-27 | 2026-01-27 | Задача 002 |
+| 005 | Критические баги (JSON mode, VLMAgent, OCR Tool) | Critical | Выполнена | 2026-01-27 | 2026-01-28 | Задачи 001-004 |
+| 006 | pyproject.toml и подготовка к публикации | High | Выполнена | 2026-01-28 | 2026-01-28 | Нет |
+| 007 | CLI интерфейс для распознавания документов | High | Выполнена | 2026-01-28 | 2026-01-28 | Нет |
+| 008 | Рефакторинг и отладка (2026-02-09) | Critical | Выполнена | 2026-02-09 | 2026-02-09 | Задачи 001-007 |
+| 009 | Оптимизация OCR: page-based batching (Variant 2) | High | Эскалация к Architect | - | - | Задача 008 |
 
 ---
 
-## Детали задач
+## Фаза 1: v0.1.0 — Базовая реализация (ЗАВЕРШЕНА)
 
-### Задача 001: Base utilities
-
-**Модули:**
-- PDF Renderer (рендеринг PDF→PNG)
-- OCR нормализация (утилита для исправления OCR ошибок)
-- State Manager (Memory + Disk backends)
-
-**Критерии готовности:**
-- [ ] `PDFRenderer.render_pdf()` для всех страниц
-- [ ] `PDFRenderer.render_page()` с кастомным DPI
-- [ ] `normalize_ocr_digits()` с заменами O→0, l→1, S→5, B→8
-- [ ] `StateManager` с Memory и Disk backends
-- [ ] Unit тесты для рендеринга (размер изображений, DPI)
-- [ ] Unit тесты для State Manager (save/load)
-
-**Reference:** `00_docs/architecture/implementation_plan.md` → Задача 1
-
-**Reference код:** `02_src/_reference/pdf_utils.py`, `02_src/_reference/tools.py`
+Задачи 001-007 — полный цикл от базовых утилит до CLI. Все задачи прошли review.
 
 ---
 
-### Задача 002: VLM processing (критический путь)
+## Задача 008: Рефакторинг и отладка (2026-02-09)
 
-**Модули:**
-- VLM Client (Gemini REST API с retry и throttling)
-- VLM Agent (tool calling loop)
-- DocumentProcessor (главный класс)
+**Статус:** Выполнена
 
-**Критерии готовности:**
-- [ ] `GeminiVLMClient.invoke()` с retry и throttling
-- [ ] `VLMAgent.invoke()` с tool calling loop (max 10 итераций)
-- [ ] `VLMAgent.register_tool()` для регистрации handlers
-- [ ] `DocumentProcessor` с инициализацией из PDF/PNG
-- [ ] `DocumentProcessor.pages` и `num_pages`
-- [ ] Unit тесты для VLM Client (retry на 429/500)
-- [ ] Unit тесты для throttling (min_interval_s)
-- [ ] Unit тесты для tool calling loop (1, 2, 10 итераций)
-- [ ] Unit тесты для DocumentProcessor (PDF vs PNG)
+**Что было сделано:**
+- OCRTool теперь сам получает изображения из StateManager по page_num
+- VLM Agent — единообразный вызов всех tool через `handler(**func_args)`
+- VLM Client — поддержка `contents` (полная история диалога Gemini)
+- Three-pass OCR стратегия: VLM читает → реестр OCR-сущностей → ask_ocr → подстановка
+- Маркеры страниц [G{N}] в верхнем левом углу
+- Параллельное выполнение tool calls (ThreadPoolExecutor, max_tool_workers=5)
+- max_iterations увеличен до 100
+- CLI: --max-tool-workers, --max-iterations
+- Исправлена кодировка cp1251 (arrow char)
+- Защита от None: `result.text or ''`
 
-**Reference:** `00_docs/architecture/implementation_plan.md` → Задача 2
+**Результаты тестовых запусков (test_document.pdf, 8 страниц):**
 
-**Reference код:** `02_src/_reference/gemini_client.py`, `02_src/_reference/vlm_client.py`, `02_src/_reference/hybrid_dialogue.py`
-
----
-
-### Задача 003: OCR support
-
-**Модули:**
-- OCR Client (Qwen VL API)
-- OCR Tool (агентская обертка)
-
-**Критерии готовности:**
-- [ ] `QwenOCRClient.extract()` с retry logic
-- [ ] `OCRTool.to_tool_definition()` - tool definition для VLM
-- [ ] `OCRTool.execute()` с нормализацией
-- [ ] Unit тесты для OCR Client
-
-**Reference:** `00_docs/architecture/implementation_plan.md` → Задача 3
-
-**Reference код:** `02_src/_reference/qwen_client.py`
+| Запуск | Время | OCR-вызовов | max_iter | Результат |
+|--------|-------|-------------|----------|-----------|
+| 174559 | 12 мин | 66 (sequential) | 100 | Полный текст + 48 headers |
+| 191547 | 2 мин | 0 | 100 | Ошибка: text=None |
+| 192010 | 7 мин | 10 | 10 | Неполный (text=null, 49 headers) |
+| 193215 | 6 мин | 65 (parallel, 5 workers) | 100 | Полный текст + 58 headers |
 
 ---
 
-### Задача 004: High-level operations
+## Задача 009: Оптимизация OCR — page-based batching (Variant 2)
 
-**Модули:**
-- BaseOperation (абстрактный базовый класс)
-- FullDescriptionOperation (основная операция)
-- Схемы данных (DocumentData, HeaderInfo, TableInfo)
+**Статус:** Эскалация к Architect
 
-**Критерии готовности:**
-- [ ] `BaseOperation` абстрактный класс
-- [ ] `FullDescriptionOperation.execute()` с VLM промптами
-- [ ] `DocumentData`, `HeaderInfo`, `TableInfo` схемы
-- [ ] Unit тесты для FullDescriptionOperation
-- [ ] Интеграционный тест: PDF → DocumentData
-- [ ] Проверка контракта с проектом 07 (совпадение схем)
+**Проблема:** VLM запрашивает OCR для каждой сущности отдельно (66 ask_ocr вызовов). Многие нацелены на одну страницу (20+ URL с page 7, 21 с page 8). Это неоптимально: один Qwen-запрос занимает 5-10 сек, общее время OCR — 3-5 мин.
 
-**Reference:** `00_docs/architecture/implementation_plan.md` → Задача 4
+**Целевая метрика:** 66 вызовов → ~8 (один на страницу), время OCR: 5 мин → ~1 мин.
 
----
-
-### Задача 006: pyproject.toml и подготовка к публикации
-
-**Модули:**
-- `pyproject.toml` — современная конфигурация пакета
-- Публичный API в `vlm_ocr_doc_reader/__init__.py`
-- README с примерами использования
-
-**Критерии готовности:**
-- [ ] `pyproject.toml` с metadata (name, version, dependencies)
-- [ ] Entry points для установки: `pip install -e .`
-- [ ] Публичный API экспортируется через `__init__.py`
-- [ ] README с примерами использования (создание клиентов, процессора, операции)
-- [ ] `.gitignore` исключает `build/`, `dist/`, `*.egg-info/`
-- [ ] Проверка установки: `pip install -e .` успешна
-
-**Reference:** Python packaging standards (PEP 517/518)
-
----
-
-### Задача 007: CLI интерфейс для распознавания документов
-
-**Модули:**
-- `vlm_ocr_doc_reader/cli.py` — CLI entry point
-- Регистрация в `pyproject.toml` как `[project.scripts]`
-
-**Критерии готовности:**
-- [ ] CLI принимает путь к PDF как аргумент
-- [ ] CLI принимает опциональный `--output-dir` для сохранения результатов
-- [ ] CLI использует `FullDescriptionOperation` под капотом
-- [ ] CLI сохраняет результаты в YAML (`state_dir/results/full_description.yaml`)
-- [ ] CLI показывает прогресс (логирование в stdout)
-- [ ] Unit тесты для CLI (мокованное выполнение)
-- [ ] Интеграционный тест: CLI с реальным PDF
-
-**Пример использования:**
-```bash
-vlm-ocr-reader document.pdf --output-dir ./results
-```
-
-**Reference:** `02_src/vlm_ocr_doc_reader/operations/full_description.py`
-
----
-
-## Параллельность задач
-
-**Можно запускать параллельно:**
-- Задачи 001 и 002 (минимум зависимостей)
-- Задача 003 с Задачей 002 (после завершения Задачи 001)
-- Задачи 006 и 007 (независимые, после задач 001-005)
-
-**Последовательная зависимость:**
-- Задача 004 после завершения Задачи 002
-- Задачи 006 и 007 после завершения задач 001-005
-
-**Диаграмма зависимостей:**
-
-```mermaid
-graph TD
-    Z1[Задача 001: Base utilities] --> Z2[Задача 002: VLM processing]
-    Z1 --> Z3[Задача 003: OCR support]
-
-    Z2 --> Z4[Задача 004: Operations]
-
-    Z2 --> Z5[Задача 005: Bug fixes]
-    Z3 --> Z5
-
-    Z5 --> Z6[Задача 006: pyproject.tomm]
-    Z5 --> Z7[Задача 007: CLI]
-
-    style Z2 fill:#f9f,stroke:#333,stroke-width:4px
-    style Z4 fill:#9f9,stroke:#333,stroke-width:2px
-    style Z6 fill:#ff9,stroke:#333,stroke-width:2px
-    style Z7 fill:#ff9,stroke:#333,stroke-width:2px
-```
-
----
-
-## Reference файлы
-
-**Скопировано из `05_a_reports_ETL_02`:**
-- `02_src/_reference/gemini_client.py` - Gemini REST API клиент
-- `02_src/_reference/vlm_client.py` - VLM Client с throttling
-- `02_src/_reference/qwen_client.py` - Qwen OCR клиент
-- `02_src/_reference/pdf_utils.py` - PDF рендеринг
-- `02_src/_reference/hybrid_dialogue.py` - Function calling pattern
-- `02_src/_reference/tools.py` - OCR нормализация
+**Требует архитектурного решения:** см. `00_docs/architecture/_questions_architect.md`
 
 ---
 
@@ -198,6 +71,7 @@ graph TD
 
 | Дата | Версия | Изменения | Автор |
 |------|--------|-----------|-------|
-| 2025-01-28 | 3.0 | Добавлены задачи 006 (pyproject.toml) и 007 (CLI) для подготовки к публикации | Tech Lead |
-| 2025-01-27 | 2.0 | Переписан с укрупненными задачами (4 задачи вместо 37) | Tech Lead |
-| 2025-01-27 | 1.0 | Первая версия (детализированный backlog) | Architect |
+| 2026-02-20 | 4.0 | Актуализация: добавлена задача 008 (рефакторинг 2026-02-09), задача 009 (OCR batching), убран дубликат 007, обновлены даты | Tech Lead |
+| 2026-01-28 | 3.0 | Добавлены задачи 006 (pyproject.toml) и 007 (CLI) | Tech Lead |
+| 2026-01-27 | 2.0 | Переписан с укрупненными задачами (4 задачи вместо 37) | Tech Lead |
+| 2026-01-27 | 1.0 | Первая версия (детализированный backlog) | Architect |

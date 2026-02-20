@@ -1,8 +1,8 @@
 # Архитектура проекта vlm-ocr-doc-reader
 
-**Версия:** 1.0
-**Дата:** 2025-01-27
-**Статус:** Черновик архитектуры
+**Версия:** 2.0
+**Дата:** 2026-02-20
+**Статус:** Фаза 1 реализована, Фаза 2 в проектировании
 
 ---
 
@@ -12,412 +12,236 @@
 
 Модуль базируется на концептуальном разделении агентского и технического уровней:
 
-- **VLM Agent** - агентская сущность (промпты, tool calling loop, инструменты)
-- **VLM Client** - техническая реализация (REST/SDK, throttling, retry)
-- **OCR Tool** - агентская сущность (алгоритм вызова, конфигурация)
-- **OCR Client** - техническая реализация OCR API
+- **VLM Agent** — агентская сущность (промпты, tool calling loop, conversation history, параллельное выполнение tools)
+- **VLM Client** — техническая реализация (REST API Gemini, throttling, retry, conversation `contents`)
+- **OCR Tool** — агентская сущность (получение image из StateManager, вызов OCR)
+- **OCR Client** — техническая реализация OCR API (Qwen VL)
 
 ```mermaid
 graph TB
-    subgraph "DocumentProcessor"
-        DP[DocumentProcessor]
-
-        subgraph "VLM Agent"
-            Agent[VLM Agent]
-            Prompts[System/User Prompts]
-            Tools[Available Tools]
-            Loop[Tool Calling Loop<br/>max 10 iterations]
-        end
-
-        subgraph "VLM Client"
-            VLMClient[VLM Client]
-            VLM_API[REST/SDK]
-            VLM_Throttle[Throttling]
-            VLM_Retry[Retry Logic]
-        end
-
-        subgraph "OCR Tool"
-            OCRTool[OCR Tool]
-            OCRAlgo[Algorithm]
-        end
-
-        subgraph "OCR Client"
-            OCRClient[OCR Client]
-            OCR_API[REST/SDK]
-            OCR_Throttle[Throttling]
-            OCR_Retry[Retry Logic]
-        end
-
-        DP --> Agent
-        Agent --> Prompts
-        Agent --> Tools
-        Agent --> Loop
-        Agent -.uses.-> VLMClient
-        VLMClient --> VLM_API
-        VLMClient --> VLM_Throttle
-        VLMClient --> VLM_Retry
-
-        Tools --> OCRTool
-        OCRTool --> OCRAlgo
-        OCRTool -.uses.-> OCRClient
-        OCRClient --> OCR_API
-        OCRClient --> OCR_Throttle
-        OCRClient --> OCR_Retry
-
-        Loop -.calls.-> Tools
+    subgraph "CLI (cli.py)"
+        CLI[CLI Entry Point]
     end
 
     subgraph "Operations"
-        Ops[Operations]
+        FD[FullDescriptionOperation]
     end
 
-    DP --> Ops
-    Ops -.uses.-> Agent
+    subgraph "DocumentProcessor"
+        DP[DocumentProcessor]
+        SM[StateManager]
+
+        subgraph "VLM Agent"
+            Agent[VLM Agent]
+            Messages["self.messages<br/>(conversation history)"]
+            TPE["ThreadPoolExecutor<br/>max_workers=5"]
+            Loop["Tool Calling Loop<br/>max 100 iterations"]
+        end
+
+        subgraph "VLM Client"
+            VLMClient[GeminiVLMClient]
+            VLM_API["REST API<br/>gemini-2.5-flash"]
+            VLM_Throttle["Throttling 0.6s"]
+            VLM_Retry["Retry 429/5xx"]
+        end
+
+        subgraph "OCR Tool"
+            OCRTool["OCRTool<br/>(ask_ocr)"]
+        end
+
+        subgraph "OCR Client"
+            OCRClient[QwenOCRClient]
+            OCR_API["OpenAI-compatible API<br/>qwen-vl-plus"]
+            OCR_Retry["Retry 429/5xx"]
+        end
+    end
+
+    CLI --> FD
+    FD --> DP
+    DP --> SM
+    DP --> Agent
+    Agent --> Messages
+    Agent --> TPE
+    Agent --> Loop
+    Agent -.uses.-> VLMClient
+    VLMClient --> VLM_API
+    VLMClient --> VLM_Throttle
+    VLMClient --> VLM_Retry
+    Agent -.contents=self.messages.-> VLMClient
+
+    Loop -.calls.-> OCRTool
+    TPE -.parallel.-> OCRTool
+    OCRTool -.load_page.-> SM
+    OCRTool -.uses.-> OCRClient
+    OCRClient --> OCR_API
+    OCRClient --> OCR_Retry
 ```
 
 ### Ключевые принципы
 
 1. **Agent → Client relation**: VLM Agent использует VLM Client, OCR Tool использует OCR Client
-2. **Tool Calling Loop**: VLM → tool call → выполнить tool → вернули в VLM → повтор до max 10 итераций
-3. **Все клиенты имеют retry-логику**
-4. **OCR Tool** - отдельная сущность, используется VLM Agent через tools
-5. **Прямой вызов OCR** - не поддерживается (только через VLM Agent)
+2. **Conversation history**: VLM Agent хранит `self.messages`, передает `contents=self.messages` в VLM Client — полная история диалога
+3. **Three-pass OCR strategy**: VLM читает текст → строит реестр OCR-сущностей → вызывает ask_ocr для каждой → подставляет результаты
+4. **Параллельное выполнение tools**: ThreadPoolExecutor(max_workers=5) для одновременного выполнения нескольких ask_ocr вызовов
+5. **OCR Tool самостоятелен**: получает image из StateManager по page_num, не зависит от VLM Agent для доступа к изображениям
+6. **Uniform tool calling**: VLM Agent не знает про OCR — все tools вызываются одинаково через `handler(**func_args)`
+7. **Все клиенты имеют retry-логику**: exponential backoff на 429/5xx
+8. **Прямой вызов OCR не поддерживается**: только через VLM Agent via tool calling
 
 ---
 
-## 2. Структура модулей
-
-> **📢 Оговорка для Tech Lead:**
->
-> Привет! Это предложение структуры от Architect. Ты волен корректировать состав файлов и организацию модулей исходя из результатов твоего анализа.
->
-> **ВАЖНО:** Ориентируйся на проект `05_a_reports_ETL_02` - там уже есть рабочая реализация VLM/OCR клиентов, рендеринга PDF, батчинга. Переиспользуй паттерны.
->
-> **⚠️ Если у тебя нет доступа к `05_a_reports_ETL_02` или `07_agentic-doc-processing`** - остановись и запроси доступ у пользователя.
->
-> -- Architect
+## 2. Структура модулей (фактическая)
 
 ```
 vlm_ocr_doc_reader/
-├── __init__.py                    # Public API: UniversalDocumentProcessor
+├── __init__.py                    # Public API
+├── cli.py                         # CLI entry point (argparse)
 │
 ├── core/
 │   ├── __init__.py
-│   ├── processor.py               # DocumentProcessor (главный класс)
-│   ├── vlm_agent.py               # VLMAgent (промпты, tool calling loop)
-│   ├── vlm_client.py              # BaseVLMClient, GeminiVLMClient
-│   ├── ocr_tool.py                # OCRTool (алгоритм вызова)
+│   ├── processor.py               # DocumentProcessor
+│   ├── vlm_agent.py               # VLMAgent (tool calling loop, ThreadPoolExecutor)
+│   ├── vlm_client.py              # BaseVLMClient, GeminiVLMClient (contents support)
+│   ├── ocr_tool.py                # OCRTool (state_manager, ask_ocr)
 │   ├── ocr_client.py              # BaseOCRClient, QwenOCRClient
-│   └── state.py                   # DocumentState, StorageBackends (memory/disk)
+│   └── state.py                   # StateManager, MemoryStorage, DiskStorage
 │
 ├── operations/
 │   ├── __init__.py
-│   ├── base.py                    # BaseOperation (абстрактный класс)
-│   ├── full_description.py        # FullDescriptionOperation (контракт для 07)
-│   ├── clustering.py              # ClusteringOperation
-│   ├── triage.py                  # TriageOperation
-│   └── extraction.py              # ExtractionOperation
+│   ├── base.py                    # BaseOperation
+│   └── full_description.py        # FullDescriptionOperation (three-pass prompts)
 │
 ├── preprocessing/
 │   ├── __init__.py
-│   ├── renderer.py                # PDFRenderer (pdf → png)
-│   └── page_numberer.py           # PageNumberer (нумерация страниц, future)
+│   └── renderer.py                # PDFRenderer ([G{N}] page markers)
 │
 ├── schemas/
 │   ├── __init__.py
-│   ├── document.py                # DocumentData (контракт), TableInfo, HeaderInfo
+│   ├── document.py                # DocumentData, HeaderInfo, TableInfo
 │   ├── common.py                  # PageInfo, ClusterInfo, TriageResult
 │   └── config.py                  # ProcessorConfig, VLMConfig, OCRConfig
 │
 └── utils/
     ├── __init__.py
-    ├── batching.py                # PageBatching (из 05_a_reports_ETL_02)
-    ├── normalization.py           # OCRNormalization (O→0, l→1)
-    └── logging.py                 # Logger setup
+    └── normalization.py           # OCR normalization (raw values, no forced digits)
 ```
+
+**Не реализовано в v0.1.0 (запланировано):**
+- `operations/clustering.py` — ClusteringOperation (P1)
+- `operations/triage.py` — TriageOperation (P2)
+- `operations/extraction.py` — ExtractionOperation (P2)
+- `preprocessing/page_numberer.py` — (не нужен, [G{N}] реализован в renderer.py)
+- `utils/batching.py` — PageBatching (будет заменен page-based OCR batching)
 
 ---
 
 ## 3. Ключевые архитектурные решения
 
-### 3.1. Operations Organization
+### 3.1. Operations Organization (без изменений)
 
-**⚠️ ВАЖНО: Правильный подход к работе с operations**
-
-**Никаких** методов вида `processor.full_description()`, `processor.cluster()`, etc.!
-
-**Только** подход через импорт и вызов `.execute()`:
-
-```python
-from vlm_ocr_doc_reader.operations import TriageOperation, ClusteringOperation, FullDescriptionOperation
-
-# Операции импортируются как классы
-triage = TriageOperation(processor)
-cluster = ClusteringOperation(processor)
-full_desc = FullDescriptionOperation(processor)
-
-# Вызов через .execute()
-result = triage.execute(prompt="найди страницы с таблицами")
-result = cluster.execute(prompt="сгруппируй по смыслу")
-result = full_desc.execute()
-```
-
-**Принятый подход:** Operations импортируются как самостоятельные классы, при создании получают экземпляр процессора
-
-```python
-from vlm_ocr_doc_reader.operations import TriageOperation, ClusteringOperation
-
-# Операции импортируются как классы
-triage = TriageOperation(processor)
-cluster = ClusteringOperation(processor)
-
-# Вызов напрямую
-result = triage.execute(prompt="...")
-```
-
-**Обоснование:**
-- Гибкость, операции независимы
-- Явная связь с процессором
-- Возможность использовать операции отдельно
-
-### 3.2. State Management
-
-**Единая точка управления:** `core/state.py`
-
-**Стратегии хранения:**
-- **Memory** - если `state_dir` не указан (по умолчанию)
-- **Disk** - если указан `state_dir` (JSON/YAML)
-- **Database** - future (через клиент БД)
-
-**Архитектурный запас:** Базовый интерфейс `StorageBackend` с реализациями для memory/disk. В будущем можно добавить `DatabaseStorage`.
-
-**Что сохраняется:**
-- Рендеренные страницы (PNG)
-- VLM ответы
-- Результаты operations
-
-### 3.3. Batching Strategy
-
-**Подход:** По количеству страниц (из конфигурации клиента)
-
-**Обоснование:**
-- Проще и надежнее чем токен-лимиты
-- Переиспользование паттерна из `05_a_reports_ETL_02`
-- Токен-лимиты ошибкоопасны (модель пытается уложиться → ошибки)
-
-**Batch size настраивается** в конфигурации VLM/OCR клиентов.
-
-### 3.4. Приоритеты Operations для v0.1.0
-
-- **P0:** `FullDescriptionOperation` - контракт для `07_agentic-doc-processing`
-- **P1:** `ClusteringOperation` - кластеризация страниц
-- **P2:** `TriageOperation`, `ExtractionOperation` - расширенная функциональность
-
-### 3.5. Входные данные DocumentProcessor
-
-**Поддерживаемые форматы:**
-- **PDF файл** - автоматически рендерится в PNG через preprocessing/renderer.py
-- **Массив PNG** - готовые страницы, используются как есть
-
-**Логика:**
-```python
-# PDF - автоматический рендеринг
-processor = DocumentProcessor(source="report.pdf")
-# → внутренне вызывает renderer: PDF → [PNG, PNG, ...]
-
-# Массив PNG - используется как есть
-processor = DocumentProcessor(source=[page1_png, page2_png, ...])
-```
-
-**⚠️ Важно:** DPI для рендеринга PDF настраивается иерархически (см. 3.7)
-
-### 3.6. Auto-save и State Management (детали)
-
-**Гибридный подход к автосохранению:**
-
+Operations импортируются как самостоятельные классы:
 ```python
 from vlm_ocr_doc_reader.operations import FullDescriptionOperation
-
-# Auto-save ВКЛЮЧЕН по умолчанию
-processor = DocumentProcessor("report.pdf", state_dir="state")  # auto_save=True
-
-full_desc = FullDescriptionOperation(processor)
-result = full_desc.execute()  # ← автоматически сохранится в state_dir/results/full_description.yaml
+op = FullDescriptionOperation(processor)
+result = op.execute()
 ```
 
-**Эксперименты без автосохранения:**
+### 3.2. State Management (без изменений)
+
+- **Memory** — если `state_dir` не указан
+- **Disk** — если указан `state_dir`
+- OCRTool обращается к StateManager.load_page(page_num) для получения изображений
+
+### 3.3. Three-Pass OCR Strategy (НОВОЕ, реализовано 2026-02-09)
+
+**Промпт PROMPT_TEXT в full_description.py содержит инструкцию для трёх проходов:**
+
+1. **Проход 1 — Извлечение текста**: VLM читает все страницы по маркерам [G{N}], извлекает полный текст
+2. **Проход 2 — Реестр OCR-сущностей**: VLM определяет precision-critical данные (URLs, IDs, имена, телефоны, адреса) и формирует реестр с указанием страницы и контекста
+3. **Проход 3 — OCR верификация**: VLM вызывает ask_ocr для каждой сущности, получает точные значения, подставляет в текст (OCR имеет приоритет)
+
+### 3.4. Parallel Tool Execution (НОВОЕ, реализовано 2026-02-09)
 
 ```python
-# Auto-save ВЫКЛЮЧЕН
-processor = DocumentProcessor("report.pdf", state_dir="state", auto_save=False)
-
-for prompt in test_prompts:
-    triage = TriageOperation(processor)
-    result = triage.execute(prompt)  # ← НЕ сохраняется
-
-# Явное сохранение только удачного результата
-processor.save_state()
+# VLMAgent._execute_tool_calls()
+if self.max_tool_workers <= 1:
+    return [run_one(fc) for fc in function_calls]  # Sequential
+with ThreadPoolExecutor(max_workers=self.max_tool_workers) as pool:
+    return list(pool.map(run_one, function_calls))  # Parallel, order preserved
 ```
 
-**Структура state_dir:**
+Gemini может вернуть 1-30 function calls за итерацию (недетерминированно). Все выполняются параллельно через ThreadPoolExecutor.
 
-```
-state_dir/
-├── cache/
-│   ├── pages/              # Рендеренные страницы (PNG)
-│   │   ├── page_001.png
-│   │   ├── page_002.png
-│   │   └── ...
-│   └── vlm_responses/      # VLM ответы (JSON)
-│       ├── response_full_desc.json
-│       └── response_cluster.json
-│
-├── results/                # Результаты operations (YAML)
-│   ├── full_description.yaml
-│   ├── clustering.yaml
-│   ├── triage.yaml
-│   └── extraction.yaml
-│
-├── logs/                   # Логи (если state_dir задан)
-│   └── vlm_ocr.log
-│
-└── state.json              # Metadata (auto_save, DPI, etc.)
-```
+### 3.5. Conversation History (НОВОЕ, реализовано 2026-02-09)
 
-**Форматы хранения:**
-- **Technical** (PNG, JSON) - в `cache/`
-- **Content** (results) - в `results/` как YAML (человеко-читаемые)
-- **Metadata** - `state.json`
+VLM Client принимает `contents` — полная история сообщений Gemini. VLM Agent передает `contents=self.messages`. Это позволяет:
+- Multi-turn dialogue (модель помнит предыдущие ходы)
+- Three-pass strategy (промпт инструктирует делать несколько проходов в рамках одного invoke)
+- OCR результаты видны модели при следующей итерации
 
-### 3.7. Иерархия настроек DPI для рендеринга
+### 3.6. Page Markers [G{N}] (НОВОЕ, реализовано 2026-02-09)
 
-**Уровни настроек (от общего к частному):**
+PDFRenderer штампует `[G1]`, `[G2]` и т.д. в верхнем левом углу каждой страницы. Это позволяет VLM точно идентифицировать страницы и указывать правильный `page_num` при вызове ask_ocr.
+
+### 3.7. Init Order in Processor (уточнение)
 
 ```python
-# Уровень 1: Глобальный дефолт в процессоре
-processor = DocumentProcessor("report.pdf", config={
-    "render_dpi": 150  # разумный дефолт для всех операций
-})
-
-# Уровень 2: Переопределение в operation
-full_desc = FullDescriptionOperation(
-    processor,
-    render_dpi=200  # выше для точности извлечения
-)
-
-# Уровень 3: Явный вызов renderer (редкий случай)
-pages = processor._render_pdf(dpi=300)
+# Критический порядок инициализации:
+1. StateManager (нужен OCRTool)
+2. VLMClient (нужен VLMAgent)
+3. OCRClient + OCRTool(ocr_client, state_manager)  # если QWEN_API_KEY задан
+4. VLMAgent(vlm_client) + register_tool(ask_ocr, ocr_tool.execute)
+5. Pages (render PDF + save to StateManager)
 ```
-
-**Принцип:** Настройки "сверху-вниз" - дефолт можно переопределить на любом уровне.
 
 ---
 
-## 4. Интеграционные точки
+## 4. Интеграционные точки (без изменений)
 
 ### 4.1. Контракт с 07_agentic-doc-processing
 
-**Основной метод:** `FullDescriptionOperation.execute()` возвращает `DocumentData`
-
-**Структура DocumentData:**
 ```python
 @dataclass
 class DocumentData:
-    text: str                                    # Полный текст документа
-    structure: Dict[str, Any]                    # Иерархия заголовков
-    tables: List[Dict[str, Any]] = field(default_factory=list)  # Таблицы
+    text: str                          # Полный текст (с OCR-верифицированными данными)
+    structure: Dict[str, Any]          # {"headers": [{"level": N, "title": "...", "page": N}]}
+    tables: List[Dict[str, Any]]       # Пустой в v0.1.0
 ```
 
-**Классификация таблиц:**
-- `NUMERIC` - числовые таблицы
-- `TEXT_MATRIX` - текстовые матрицы (с cell flattening)
+### 4.2. CLI
 
-**Cell Flattening:** Преобразование ячеек в список утверждений вида "заголовок строки + заголовок столбца → содержимое"
-
-**⚠️ Важно:** Классификацию таблиц (NUMERIC/TEXT_MATRIX) в v0.1.0 не реализуем. Все таблицы возвращаем как есть без типа. Реализуем в будущих версиях.
-
-### 4.2. Паттерны из 05_a_reports_ETL_02
-
-**Переиспользовать:**
-- `GeminiRestClient` - базовый VLM клиент с retry, exponential backoff
-- `VLMClient` - обертка с throttling (min_interval_s: 0.6)
-- `QwenClient` - OCR для числовых полей с форматом ответа:
-  ```
-  ЗНАЧЕНИЕ: <значение>
-  КОНТЕКСТ: <фрагмент текста>
-  ПОЯСНЕНИЕ: <объяснение>
-  ```
-- `pdf_utils.py` - рендеринг PDF→PNG (DPI: 110-150, quality: 80-85)
-- PageBatching - группировка страниц (head/tail/union)
-- HybridDialogueManager - function calling с инструментами
-- **OCR нормализация:** O→0, l→1, S→5, B→8
-
-**НЕ переносить:**
-- Специфичные поля аудиторских заключений
-- Field processors (доменная логика аудита)
-
-### 4.3. Конфигурация модуля
-
-**Источники конфигурации (в порядке приоритета):**
-
-1. **Переменные окружения** (для секретов):
-   ```bash
-   GEMINI_API_KEY=xxx
-   QWEN_API_KEY=yyy
-   ```
-
-2. **При создании процессора** (основная конфигурация):
-   ```python
-   processor = DocumentProcessor(
-       source="report.pdf",
-       state_dir="03_data/state",
-       auto_save=True,
-       config={
-           "render_dpi": 150,
-           "log_level": "INFO"
-       }
-   )
-   ```
-
-3. **На уровне operations** (переопределение):
-   ```python
-   full_desc = FullDescriptionOperation(processor, render_dpi=200)
-   ```
-
-**Логирование:**
-- **По умолчанию:** stdout (уровень INFO)
-- **Если задан state_dir:** additionally → `state_dir/logs/vlm_ocr.log`
-- **Настройка:** через `config["log_level"]` или переменную `VLM_LOG_LEVEL`
+```bash
+vlm-ocr-reader <pdf_path> [--output-dir DIR] [--dpi DPI] [--log-level LEVEL] \
+    [--max-tool-workers N] [--max-iterations N]
+```
 
 ---
 
 ## 5. Ограничения v0.1.0
 
-### Технологические ограничения
+### Технологические
+- Только Gemini VLM (`gemini-2.5-flash`)
+- Только Qwen OCR (`qwen-vl-plus`)
+- API ключи через переменные окружения
 
-- **Только Gemini VLM** (`gemini-2.5-flash`)
-- **Только Qwen OCR** (`qwen-vl-plus`)
-- **Без аутентификации** - API ключи через переменные окружения
-- **Хранение state** - только в памяти или в файлах (JSON/YAML)
+### Функциональные
+- Только FullDescriptionOperation (P0)
+- Без классификации таблиц (NUMERIC/TEXT_MATRIX)
+- Без расширения клиентов (нельзя добавить Claude VLM или Tesseract OCR)
 
-### Функциональные ограничения
+### Производительность
+- OCR вызывается по одной сущности (66 отдельных запросов)
+- Gemini batching недетерминированен
+- Общее время обработки 8-страничного документа: ~6 мин
 
-- **Простой triage** - только по промпту (без сложного алгоритма)
-- **Без PageNumberer** - нумерация страниц не реализована (future)
-- **Без классификации таблиц** - NUMERIC/TEXT_MATRIX не реализуем (future)
-- **State management** - реализовать возможность сохранения состояния (будет использоваться при разработке и тестировании пайплайнов)
-
-### Архитектурные ограничения
-
-- **Без расширения клиентов** - нельзя добавить Claude VLM или Tesseract OCR
-- **Без custom operations** - нельзя зарегистрировать свою операцию
-- **Без batch prompts оптимизации** - последовательные вызовы
+**Планируемая оптимизация:** page-based OCR batching (задача 009, эскалация к Architect).
 
 ---
 
-**История изменений:**
+## История изменений
 
 | Дата | Версия | Изменения | Автор |
 |------|--------|-----------|-------|
-| 2025-01-27 | 1.1 | Добавлены входные данные, auto-save, DPI иерархия, OCR формат, конфигурация, явный акцент на operations подход | Architect |
-| 2025-01-27 | 1.0 | Черновик архитектуры | Architect |
+| 2026-02-20 | 2.0 | Актуализация: фактическая архитектура (conversation history, parallel OCR, three-pass, [G{N}], init order), ограничения, Фаза 2 | Tech Lead |
+| 2026-01-27 | 1.1 | Добавлены входные данные, auto-save, DPI иерархия, OCR формат, конфигурация | Architect |
+| 2026-01-27 | 1.0 | Черновик архитектуры | Architect |
