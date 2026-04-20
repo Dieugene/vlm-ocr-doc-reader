@@ -22,7 +22,7 @@ class VLMConfig:
     """
     api_key: str
     model: str = "gemini-2.5-flash"
-    timeout_sec: int = 60
+    timeout_sec: int = 120
     max_retries: int = 3
     backoff_base: float = 1.5
     min_interval_s: float = 0.6

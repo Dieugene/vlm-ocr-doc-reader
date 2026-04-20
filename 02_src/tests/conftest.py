@@ -1,15 +1,29 @@
 """Root conftest — loads .env and configures file logging to 04_logs/."""
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from project root (worktree root when using git worktree)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
+
+
+def is_gemini_key_valid() -> bool:
+    """Return True if GEMINI_API_KEY is set and not a known dummy value."""
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        return False
+    _DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+    return key.lower() not in _DUMMY_KEYS
+
+
 
 # === File logging to 04_logs/ ===
-LOGS_DIR = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\04_logs")
+LOGS_DIR = _PROJECT_ROOT / "04_logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 _ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")

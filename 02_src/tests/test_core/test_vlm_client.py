@@ -1,24 +1,35 @@
 """Tests for VLM Client — real Gemini API calls.
 
-Requires GEMINI_API_KEY environment variable.
-Tests are skipped if the key is not set.
+Requires GEMINI_API_KEY in .env (real key, not dummy).
+Tests are skipped if the key is not set or is dummy.
 """
 
 import os
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from vlm_ocr_doc_reader.core.vlm_client import GeminiVLMClient, BaseVLMClient
 from vlm_ocr_doc_reader.schemas.config import VLMConfig
 from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
 
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 skip_no_gemini = pytest.mark.skipif(
-    not GEMINI_API_KEY, reason="GEMINI_API_KEY not set"
+    not _is_gemini_key_valid(), reason="GEMINI_API_KEY not set or is dummy"
 )
 
-TEST_PDF = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data\test_document.pdf")
+_SRC_ROOT = Path(__file__).resolve().parent.parent.parent  # 02_src
+TEST_PDF = _SRC_ROOT / "03_data" / "test_document.pdf"
 
 
 @pytest.fixture(scope="module")
@@ -131,3 +142,62 @@ class TestGeminiVLMClientReal:
 
         # Model should either call the tool or return text
         assert "text" in result or "function_calls" in result
+
+
+class TestGeminiVLMClientRetry:
+    """Unit-level retry behavior tests for GeminiVLMClient."""
+
+    def _make_client(self) -> GeminiVLMClient:
+        config = VLMConfig(
+            api_key="unit-test-key",
+            model="gemini-2.5-flash",
+            timeout_sec=1,
+            max_retries=3,
+            backoff_base=1.0,
+            min_interval_s=0.0,
+        )
+        return GeminiVLMClient(config)
+
+    @staticmethod
+    def _success_payload(text: str = "ok") -> dict:
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": text}],
+                    }
+                }
+            ]
+        }
+
+    def test_retries_on_read_timeout_then_succeeds(self):
+        """Client should retry on ReadTimeout and recover if next attempt succeeds."""
+        client = self._make_client()
+
+        timeout_exc = requests.exceptions.ReadTimeout("read timeout")
+        ok_response = Mock()
+        ok_response.status_code = 200
+        ok_response.json.return_value = self._success_payload("hello")
+
+        with patch("vlm_ocr_doc_reader.core.vlm_client.time.sleep", return_value=None), patch(
+            "vlm_ocr_doc_reader.core.vlm_client.requests.post",
+            side_effect=[timeout_exc, ok_response],
+        ) as post_mock:
+            result = client.invoke(prompt="hello", images=[])
+
+        assert post_mock.call_count == 2
+        assert result["text"] == "hello"
+
+    def test_exhausts_retries_on_read_timeout(self):
+        """Client should retry up to max_retries on ReadTimeout then raise."""
+        client = self._make_client()
+        timeout_exc = requests.exceptions.ReadTimeout("read timeout")
+
+        with patch("vlm_ocr_doc_reader.core.vlm_client.time.sleep", return_value=None), patch(
+            "vlm_ocr_doc_reader.core.vlm_client.requests.post",
+            side_effect=timeout_exc,
+        ) as post_mock:
+            with pytest.raises(requests.exceptions.ReadTimeout):
+                client.invoke(prompt="hello", images=[])
+
+        assert post_mock.call_count == client.config.max_retries

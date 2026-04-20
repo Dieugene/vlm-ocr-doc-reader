@@ -1,7 +1,7 @@
 """Integration tests for FullDescriptionOperation with real Gemini API.
 
 These tests require:
-1. GEMINI_API_KEY in .env file
+1. GEMINI_API_KEY in .env file (real key, not dummy)
 2. Network access to Gemini API
 3. A sample PDF document for testing
 
@@ -16,19 +16,21 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "02_src"))
 
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
 from vlm_ocr_doc_reader.operations import FullDescriptionOperation
 from vlm_ocr_doc_reader.schemas import PageInfo
 
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
 
-# Skip all tests if API key not available
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
+# Skip all tests if API key not available or is dummy
 pytestmark = pytest.mark.skipif(
-    not os.getenv("GEMINI_API_KEY"),
-    reason="GEMINI_API_KEY not set in environment"
+    not _is_gemini_key_valid(),
+    reason="GEMINI_API_KEY not set or is dummy - set real key in .env"
 )
 
 

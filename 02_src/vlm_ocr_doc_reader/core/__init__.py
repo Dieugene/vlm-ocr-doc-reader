@@ -6,6 +6,19 @@ from .state import (
     DiskStorage,
     DocumentState,
     StateManager,
+    # Resolution Levels (ADR-001)
+    ResolutionLevel,
+    PageResolution,
+    OCRRegistryEntry,
+    VerifyResult,
+    DocumentMetadata,
+    ResolutionDocumentState,
+    # Workspace (ADR-001)
+    WorkspacePaths,
+    WorkspaceStorage,
+    compute_content_hash,
+    build_document_subdir_name,
+    open_document,
 )
 from .ocr_client import (
     BaseOCRClient,
@@ -17,6 +30,7 @@ from .ocr_tool import OCRTool
 from .vlm_client import BaseVLMClient, GeminiVLMClient
 from .vlm_agent import VLMAgent
 from .processor import DocumentProcessor
+from .reader import DocumentReader
 
 __all__ = [
     # State management
@@ -25,6 +39,19 @@ __all__ = [
     "DiskStorage",
     "DocumentState",
     "StateManager",
+    # Resolution Levels (ADR-001)
+    "ResolutionLevel",
+    "PageResolution",
+    "OCRRegistryEntry",
+    "VerifyResult",
+    "DocumentMetadata",
+    "ResolutionDocumentState",
+    # Workspace (ADR-001)
+    "WorkspacePaths",
+    "WorkspaceStorage",
+    "compute_content_hash",
+    "build_document_subdir_name",
+    "open_document",
     # OCR
     "BaseOCRClient",
     "OCRConfig",
@@ -36,4 +63,5 @@ __all__ = [
     "GeminiVLMClient",
     "VLMAgent",
     "DocumentProcessor",
+    "DocumentReader",
 ]

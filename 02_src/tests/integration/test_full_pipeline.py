@@ -1,7 +1,7 @@
 """Integration test — full pipeline: DocumentProcessor → FullDescriptionOperation.
 
-Requires GEMINI_API_KEY (and optionally QWEN_API_KEY) environment variables.
-Tests are skipped if GEMINI_API_KEY is not set.
+Requires GEMINI_API_KEY (and optionally QWEN_API_KEY) in .env.
+Tests are skipped if GEMINI_API_KEY is not set or is dummy.
 """
 
 import os
@@ -12,12 +12,21 @@ import pytest
 from vlm_ocr_doc_reader.core.processor import DocumentProcessor
 from vlm_ocr_doc_reader.operations.full_description import FullDescriptionOperation
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
 skip_no_gemini = pytest.mark.skipif(
-    not GEMINI_API_KEY, reason="GEMINI_API_KEY not set"
+    not _is_gemini_key_valid(), reason="GEMINI_API_KEY not set or is dummy"
 )
 
-TEST_PDF = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data\test_document.pdf")
+# Use 02_src root for test PDF (03_data is under 02_src)
+_SRC_ROOT = Path(__file__).resolve().parent.parent.parent  # 02_src
+TEST_PDF = _SRC_ROOT / "03_data" / "test_document.pdf"
 
 
 @skip_no_gemini

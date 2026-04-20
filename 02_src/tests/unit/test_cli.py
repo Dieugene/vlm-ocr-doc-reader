@@ -1,34 +1,27 @@
-"""Unit tests for CLI module."""
+"""Unit tests for CLI v2 module."""
 
 import logging
-import os
+import pathlib
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 
 from vlm_ocr_doc_reader.cli import (
     main,
     setup_logging,
     validate_arguments,
-    create_output_directory
+    parse_pages_arg,
+    ensure_utf8_stdio,
 )
-from vlm_ocr_doc_reader.schemas.document import DocumentData
 
 
 @pytest.fixture
 def mock_pdf_path(tmp_path):
     """Create a mock PDF file path."""
     pdf_path = tmp_path / "test.pdf"
-    # Create a dummy file (not a real PDF, but exists for testing)
     pdf_path.write_bytes(b"%PDF-1.4\nmock pdf")
     return pdf_path
-
-
-@pytest.fixture
-def mock_output_dir(tmp_path):
-    """Create a mock output directory path."""
-    return tmp_path / "output"
 
 
 @pytest.fixture
@@ -64,7 +57,6 @@ class TestValidateArguments:
 
     def test_validate_valid_arguments(self, mock_pdf_path, mock_env_with_api_key):
         """Test validation with valid arguments."""
-        # Should not raise
         validate_arguments(mock_pdf_path, mock_env_with_api_key["GEMINI_API_KEY"])
 
     def test_validate_missing_pdf(self, mock_pdf_path, mock_env_with_api_key, capsys):
@@ -97,94 +89,171 @@ class TestValidateArguments:
         assert "GEMINI_API_KEY not found" in captured.err
 
 
-class TestCreateOutputDirectory:
-    """Test output directory creation."""
+class TestParsePagesArg:
+    """Test parse_pages_arg."""
 
-    def test_create_existing_directory(self, mock_output_dir):
-        """Test creating output directory when it already exists."""
-        mock_output_dir.mkdir(parents=True, exist_ok=True)
-        # Should not raise
-        create_output_directory(mock_output_dir)
-        assert mock_output_dir.exists()
+    def test_parse_none(self):
+        """None returns None."""
+        assert parse_pages_arg(None) is None
 
-    def test_create_new_directory(self, mock_output_dir):
-        """Test creating new output directory."""
-        # Remove if exists
-        if mock_output_dir.exists():
-            mock_output_dir.rmdir()
+    def test_parse_empty_string(self):
+        """Empty string returns None."""
+        assert parse_pages_arg("") is None
+        assert parse_pages_arg("   ") is None
 
-        create_output_directory(mock_output_dir)
-        assert mock_output_dir.exists()
+    def test_parse_single_page(self):
+        """Single page returns [n]."""
+        assert parse_pages_arg("3") == [3]
+
+    def test_parse_comma_separated(self):
+        """Comma-separated returns sorted list."""
+        assert parse_pages_arg("1,2,5-7") == [1, 2, 5, 6, 7]
+        assert parse_pages_arg("5,1,3") == [1, 3, 5]
+
+    def test_parse_range(self):
+        """Range N-M returns inclusive list."""
+        assert parse_pages_arg("5-7") == [5, 6, 7]
+        assert parse_pages_arg("1-1") == [1]
+
+    def test_parse_deduplicates(self):
+        """Duplicate pages are removed."""
+        assert parse_pages_arg("1,1,2,2") == [1, 2]
+
+    def test_parse_invalid_range(self):
+        """Invalid range raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid page range"):
+            parse_pages_arg("1-2-3")
+        with pytest.raises(ValueError, match="lo > hi"):
+            parse_pages_arg("5-2")
+
+    def test_parse_invalid_number(self):
+        """Invalid number raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid page number"):
+            parse_pages_arg("abc")
 
 
-class TestMainFunction:
-    """Test main CLI function."""
+class TestEnsureUtf8Stdio:
+    """Test ensure_utf8_stdio."""
+
+    def test_ensure_utf8_stdio_no_error(self):
+        """ensure_utf8_stdio does not raise."""
+        ensure_utf8_stdio()
+        # On non-Windows or UTF-8 console, may do nothing
+        assert sys.stdout is not None
+        assert sys.stderr is not None
+
+
+class TestMainSubcommands:
+    """Test main CLI with subcommands."""
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("vlm_ocr_doc_reader.cli.FullDescriptionOperation")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf"])
-    def test_main_success(
-        self,
-        mock_operation_class,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "scan", "test.pdf"])
+    def test_main_scan_success(
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
-        """Test successful execution of main function."""
-        # Mock environment
+        """Test scan subcommand success."""
         monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        mock_reader = MagicMock()
+        mock_reader.page_status.return_value = {1: "scan", 2: "scan"}
+        mock_reader_class.open.return_value = mock_reader
 
-        # Mock processor
-        mock_processor = MagicMock()
-        mock_processor.num_pages = 10
-        mock_processor.state_manager = MagicMock()
-        mock_processor_class.return_value = mock_processor
-
-        # Mock operation result
-        mock_result = DocumentData(
-            text="Sample document text",
-            structure={"headers": [{"level": 1, "title": "Introduction", "page": 1}]},
-            tables=[]
-        )
-        mock_operation = MagicMock()
-        mock_operation.execute.return_value = mock_result
-        mock_operation_class.return_value = mock_operation
-
-        # Patch Path to return our mock PDF
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
             result = main()
 
         assert result == 0
-        mock_processor_class.assert_called_once()
-        mock_operation_class.assert_called_once_with(mock_processor)
-        mock_operation.execute.assert_called_once()
-        mock_processor.state_manager.save_operation_result.assert_called_once()
+        mock_reader_class.open.assert_called_once_with(mock_pdf_path, None)
+        mock_reader.scan.assert_called_once_with(pages=None)
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("sys.argv", ["vlm-ocr-reader", "non_existent.pdf"])
-    def test_main_pdf_not_found(self, mock_load_dotenv, monkeypatch, tmp_path, capsys):
-        """Test main function with non-existent PDF."""
-        # Mock environment
-        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "resolve", "test.pdf", "--workspace", "./ws", "--pages", "1,3-5"])
+    def test_main_resolve_with_pages(
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch, tmp_path
+    ):
+        """Test resolve subcommand with --pages."""
+        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        mock_reader = MagicMock()
+        mock_reader_class.open.return_value = mock_reader
 
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        def path_side_effect(arg):
+            if str(arg) == "test.pdf":
+                return mock_pdf_path
+            if str(arg) == "./ws":
+                return ws
+            return pathlib.Path(arg)
+
+        with patch("vlm_ocr_doc_reader.cli.Path", side_effect=path_side_effect):
+            result = main()
+
+        assert result == 0
+        mock_reader_class.open.assert_called_once_with(mock_pdf_path, ws)
+        mock_reader.resolve.assert_called_once_with(pages=[1, 3, 4, 5])
+
+    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "full-description", "test.pdf"])
+    def test_main_full_description_success(
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
+    ):
+        """Test full-description subcommand (scan + resolve)."""
+        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        mock_reader = MagicMock()
+        mock_reader.get_document_data.return_value = MagicMock(
+            text="Sample text",
+            structure={"headers": []},
+            tables=[],
+        )
+        mock_reader_class.open.return_value = mock_reader
+
+        with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
+            result = main()
+
+        assert result == 0
+        mock_reader.scan.assert_called_once()
+        mock_reader.resolve.assert_called_once()
+        mock_reader.get_document_data.assert_called_once()
+
+    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "full-description", "test.pdf"])
+    def test_main_full_description_scan_failure(
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
+    ):
+        """full-description should fail-fast when scan operation fails."""
+        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        mock_reader = MagicMock()
+        mock_reader.scan.side_effect = RuntimeError("scan timeout")
+        mock_reader_class.open.return_value = mock_reader
+
+        with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
+            result = main()
+
+        assert result == 1
+        mock_reader.scan.assert_called_once()
+        mock_reader.resolve.assert_not_called()
+
+    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
+    @patch("sys.argv", ["vlm-ocr-reader", "scan", "non_existent.pdf"])
+    def test_main_pdf_not_found(self, mock_load_dotenv, monkeypatch, tmp_path, capsys):
+        """Test main with non-existent PDF."""
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         non_existent = tmp_path / "non_existent.pdf"
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=non_existent):
             result = main()
 
         assert result == 1
-        # Error message should be in stderr
         captured = capsys.readouterr()
         assert "Error: PDF file not found" in captured.err
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf"])
+    @patch("sys.argv", ["vlm-ocr-reader", "scan", "test.pdf"])
     def test_main_missing_api_key(self, mock_load_dotenv, mock_pdf_path, monkeypatch, capsys):
-        """Test main function with missing API key."""
-        # Ensure no API key is set
+        """Test main with missing API key."""
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
@@ -195,156 +264,14 @@ class TestMainFunction:
         assert "GEMINI_API_KEY not found" in captured.err
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("vlm_ocr_doc_reader.cli.FullDescriptionOperation")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf", "--output-dir", "./custom_output"])
-    def test_main_custom_output_dir(
-        self,
-        mock_operation_class,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch,
-        tmp_path
-    ):
-        """Test main function with custom output directory."""
-        # Mock environment
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
-
-        custom_output = tmp_path / "custom_output"
-
-        # Mock processor
-        mock_processor = MagicMock()
-        mock_processor.num_pages = 5
-        mock_processor.state_manager = MagicMock()
-        mock_processor_class.return_value = mock_processor
-
-        # Mock operation
-        mock_result = DocumentData(
-            text="Test text",
-            structure={"headers": []},
-            tables=[]
-        )
-        mock_operation = MagicMock()
-        mock_operation.execute.return_value = mock_result
-        mock_operation_class.return_value = mock_operation
-
-        # Create a side effect for Path to return correct paths
-        def path_side_effect(path_str):
-            if str(path_str).endswith("test.pdf"):
-                return mock_pdf_path
-            return Path(path_str)
-
-        with patch("vlm_ocr_doc_reader.cli.Path", side_effect=path_side_effect):
-            result = main()
-
-        assert result == 0
-        # Check that output directory was created
-        assert custom_output.exists()
-
-    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("vlm_ocr_doc_reader.cli.FullDescriptionOperation")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf", "--dpi", "200"])
-    def test_main_custom_dpi(
-        self,
-        mock_operation_class,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch
-    ):
-        """Test main function with custom DPI."""
-        # Mock environment
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
-
-        # Mock processor
-        mock_processor = MagicMock()
-        mock_processor.num_pages = 3
-        mock_processor.state_manager = MagicMock()
-        mock_processor_class.return_value = mock_processor
-
-        # Mock operation
-        mock_result = DocumentData(
-            text="DPI test",
-            structure={"headers": []},
-            tables=[]
-        )
-        mock_operation = MagicMock()
-        mock_operation.execute.return_value = mock_result
-        mock_operation_class.return_value = mock_operation
-
-        with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
-            result = main()
-
-        assert result == 0
-        # Verify processor was called with config containing DPI=200
-        call_args = mock_processor_class.call_args
-        assert call_args is not None
-        config = call_args.kwargs.get("config") or call_args[1].get("config")
-        # Note: We can't easily test the exact config without accessing the ProcessorConfig
-        # but we can verify the call was made
-
-    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("vlm_ocr_doc_reader.cli.FullDescriptionOperation")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf", "--log-level", "DEBUG"])
-    def test_main_debug_logging(
-        self,
-        mock_operation_class,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch
-    ):
-        """Test main function with DEBUG log level."""
-        # Mock environment
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
-
-        # Mock processor
-        mock_processor = MagicMock()
-        mock_processor.num_pages = 1
-        mock_processor.state_manager = MagicMock()
-        mock_processor_class.return_value = mock_processor
-
-        # Mock operation
-        mock_result = DocumentData(
-            text="Debug test",
-            structure={"headers": []},
-            tables=[]
-        )
-        mock_operation = MagicMock()
-        mock_operation.execute.return_value = mock_result
-        mock_operation_class.return_value = mock_operation
-
-        with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
-            result = main()
-
-        assert result == 0
-        # Check that logging level was set to DEBUG
-        logger = logging.getLogger()
-        assert logger.level == logging.DEBUG
-
-    @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf"])
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "scan", "test.pdf"])
     def test_main_keyboard_interrupt(
-        self,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
-        """Test main function with keyboard interrupt."""
-        # Mock environment
+        """Test main with keyboard interrupt."""
         monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
-
-        # Mock processor to raise KeyboardInterrupt
-        mock_processor_class.side_effect = KeyboardInterrupt()
+        mock_reader_class.open.side_effect = KeyboardInterrupt()
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
             result = main()
@@ -352,23 +279,14 @@ class TestMainFunction:
         assert result == 1
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
-    @patch("vlm_ocr_doc_reader.cli.DocumentProcessor")
-    @patch("sys.argv", ["vlm-ocr-reader", "test.pdf"])
+    @patch("vlm_ocr_doc_reader.cli.DocumentReader")
+    @patch("sys.argv", ["vlm-ocr-reader", "scan", "test.pdf"])
     def test_main_exception_handling(
-        self,
-        mock_processor_class,
-        mock_load_dotenv,
-        mock_pdf_path,
-        mock_env_with_api_key,
-        monkeypatch,
-        caplog
+        self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
-        """Test main function with exception handling."""
-        # Mock environment
+        """Test main with exception."""
         monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
-
-        # Mock processor to raise exception
-        mock_processor_class.side_effect = RuntimeError("Test error")
+        mock_reader_class.open.side_effect = RuntimeError("Test error")
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
             result = main()

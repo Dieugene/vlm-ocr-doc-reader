@@ -1,20 +1,40 @@
 """Integration tests for VLM Client with real Gemini API.
 
-These tests require GEMINI_API_KEY to be set in environment.
-If not set, tests are skipped automatically.
+These tests require GEMINI_API_KEY to be set in environment (from .env).
+If not set or set to dummy value (test/test-key), tests are skipped.
 """
 
+import json
 import os
+import re
 import pytest
 from unittest.mock import Mock
 
 from vlm_ocr_doc_reader.core.vlm_client import GeminiVLMClient
 from vlm_ocr_doc_reader.schemas.config import VLMConfig
 
-# Skip all tests if GEMINI_API_KEY not set
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+
+
+def _parse_json_from_text(text: str) -> dict:
+    """Extract and parse JSON from VLM response (may be fenced with ```json ... ```)."""
+    text = text.strip()
+    if text.startswith("```"):
+        m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if m:
+            text = m.group(1).strip()
+    return json.loads(text)
+
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
+# Skip all tests if GEMINI_API_KEY not set or is dummy
 pytestmark = pytest.mark.skipif(
-    not os.getenv("GEMINI_API_KEY"),
-    reason="GEMINI_API_KEY not set - set it to run integration tests"
+    not _is_gemini_key_valid(),
+    reason="GEMINI_API_KEY not set or is dummy - set real key in .env to run"
 )
 
 
@@ -46,19 +66,21 @@ class TestGeminiVLMClientRealAPI:
         """Test simple text request without images.
 
         Minimal test to verify basic connectivity and response parsing.
+        Contract: result['text'] is str (raw API response); may be fenced JSON.
         """
         prompt = "Respond with JSON: {\"status\": \"ok\", \"message\": \"hello\"}"
 
         result = vlm_client.invoke(prompt, [])
 
-        # Check response structure
+        # Check response structure (contract: text is str)
         assert "text" in result
-        assert isinstance(result["text"], dict)
+        assert isinstance(result["text"], str)
         assert "raw" in result
 
-        # Check content (should be parsed JSON)
-        assert result["text"]["status"] == "ok"
-        assert result["text"]["message"] == "hello"
+        # Parse JSON from response (may be fenced) and verify content
+        parsed = _parse_json_from_text(result["text"])
+        assert parsed.get("status") == "ok"
+        assert parsed.get("message") == "hello"
 
     def test_invoke_with_tools(self, vlm_client):
         """Test function calling with real API.
