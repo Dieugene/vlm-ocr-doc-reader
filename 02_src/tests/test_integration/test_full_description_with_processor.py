@@ -12,19 +12,22 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "02_src"))
 
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
 from vlm_ocr_doc_reader.core.processor import DocumentProcessor
 from vlm_ocr_doc_reader.operations import FullDescriptionOperation
 from vlm_ocr_doc_reader.schemas import DocumentData
 
-# Skip tests if API key not available
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
+# Skip tests if API key not available or is dummy
 pytestmark = pytest.mark.skipif(
-    not os.getenv("GEMINI_API_KEY"),
-    reason="GEMINI_API_KEY not set in environment"
+    not _is_gemini_key_valid(),
+    reason="GEMINI_API_KEY not set or is dummy - set real key in .env"
 )
 
 

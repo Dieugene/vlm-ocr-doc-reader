@@ -12,6 +12,7 @@
 # Project data and logs (generated during work)
 03_data/
 04_logs/
+02_src/demo_workspace/
 
 # Environment variables (contains secrets)
 .env

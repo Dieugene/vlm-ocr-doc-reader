@@ -226,6 +226,37 @@ class VLMAgent:
             "function_results": function_results
         }
 
+    def invoke_no_tools(self, prompt: str, images: List[bytes]) -> Dict[str, Any]:
+        """Execute request without tool calling. VLM returns text only, no OCR calls.
+
+        Note: Appends to self.messages (modifies conversation history).
+
+        Args:
+            prompt: User prompt
+            images: List of images (PNG bytes)
+
+        Returns:
+            {"text": str} or {"text": None, "error": str} on failure
+        """
+        user_parts = [{"text": prompt}]
+        for img_bytes in images:
+            b64_data = base64.b64encode(img_bytes).decode("utf-8")
+            user_parts.append({
+                "inline_data": {"mime_type": "image/png", "data": b64_data}
+            })
+        self.messages.append({"role": "user", "parts": user_parts})
+
+        try:
+            response = self.vlm_client.invoke(
+                contents=self.messages,
+                tools=None,
+            )
+            text = response.get("text") or ""
+            return {"text": text}
+        except Exception as e:
+            logger.error(f"VLM invoke_no_tools failed: {e}")
+            return {"text": None, "error": str(e)}
+
     def _execute_tool_calls(
         self, function_calls: List[Dict]
     ) -> List[Tuple[Dict, Dict]]:

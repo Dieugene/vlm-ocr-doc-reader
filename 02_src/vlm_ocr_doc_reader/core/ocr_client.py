@@ -44,11 +44,17 @@ class OCRConfig:
     backoff_base: float = 1.5
 
     def __post_init__(self):
-        """Load API key from environment if not provided."""
+        """Load API key from environment if not provided.
+
+        Supports QWEN_API_KEY and DASHSCOPE_API_KEY (alias for DashScope/Qwen).
+        """
         if self.api_key is None:
-            self.api_key = os.getenv("QWEN_API_KEY")
+            self.api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
         if not self.api_key:
-            raise ValueError("QWEN_API_KEY is required (set in environment or pass explicitly)")
+            raise ValueError(
+                "QWEN_API_KEY or DASHSCOPE_API_KEY is required "
+                "(set in environment or pass explicitly)"
+            )
 
 
 class BaseOCRClient(ABC):
@@ -126,13 +132,22 @@ class QwenOCRClient(BaseOCRClient):
         Returns:
             Parsed response with status/value/context/explanation
         """
-        value_match = re.search(r"ЗНАЧЕНИЕ:\s*(.+?)(?=\nКОНТЕКСТ:|\nПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
-        context_match = re.search(r"КОНТЕКСТ:\s*(.+?)(?=\nПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
+        value_match = re.search(r"ЗНАЧЕНИЕ:\s*(.+?)(?=\n\s*КОНТЕКСТ:|\n\s*ПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
+        context_match = re.search(r"КОНТЕКСТ:\s*(.+?)(?=\n\s*ПОЯСНЕНИЕ:|$)", response_text, re.DOTALL)
         explanation_match = re.search(r"ПОЯСНЕНИЕ:\s*(.+)", response_text, re.DOTALL)
 
         value_raw = value_match.group(1).strip() if value_match else ""
         context = context_match.group(1).strip() if context_match else ""
         explanation = explanation_match.group(1).strip() if explanation_match else ""
+
+        # Fallback: if no structured format but text looks like extracted value (e.g. digits)
+        if not value_raw and response_text.strip() and re.match(r"^[\d\s\-\.]+$", response_text.strip()):
+            return {
+                "status": "ok",
+                "value": response_text.strip(),
+                "context": "",
+                "explanation": "fallback",
+            }
 
         # Return raw value - normalization should be optional/controlled by caller
         if value_raw.upper() == "НЕТ" or value_raw == "-" or not value_raw:

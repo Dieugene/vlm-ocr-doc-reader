@@ -19,6 +19,18 @@ from .ocr_tool import OCRTool
 logger = logging.getLogger(__name__)
 
 
+def _read_positive_int_env(name: str, default: int) -> int:
+    """Read positive int env var with safe fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 class DocumentProcessor:
     """Main class for document processing.
 
@@ -79,8 +91,14 @@ class DocumentProcessor:
                     "Please set it in .env file or pass vlm_agent explicitly."
                 )
 
-            # Create VLM client
-            vlm_config = VLMConfig(api_key=api_key)
+            # Create VLM client (timeout/retries configurable via env)
+            vlm_timeout_sec = _read_positive_int_env("VLM_TIMEOUT_SEC", 120)
+            vlm_max_retries = _read_positive_int_env("VLM_MAX_RETRIES", 3)
+            vlm_config = VLMConfig(
+                api_key=api_key,
+                timeout_sec=vlm_timeout_sec,
+                max_retries=vlm_max_retries,
+            )
             vlm_client = GeminiVLMClient(vlm_config)
 
             # Create OCR client and tool (optional, if QWEN_API_KEY is set)
@@ -97,6 +115,9 @@ class DocumentProcessor:
                     "VLM will still work but cannot call OCR."
                 )
 
+            # Expose ocr_tool for Resolve (DocumentReader calls OCR directly)
+            self.ocr_tool = ocr_tool
+
             # Create VLM agent and register OCR tool if available
             vlm_agent = VLMAgent(
                 vlm_client,
@@ -109,6 +130,8 @@ class DocumentProcessor:
                 logger.info("Created VLM Agent with OCR Tool registered")
             else:
                 logger.info("Created VLM Agent without OCR Tool")
+        else:
+            self.ocr_tool = None
 
         self.vlm_agent = vlm_agent
 

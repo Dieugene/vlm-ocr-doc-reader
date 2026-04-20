@@ -1,72 +1,107 @@
-"""CLI interface for document recognition.
+"""CLI v2 for document recognition (ADR-001 Resolution Levels).
 
-This module provides command-line interface for PDF document processing
-using FullDescriptionOperation under the hood.
+Subcommands: scan, resolve, verify, full-description.
+Uses DocumentReader as single entry point.
 """
 
 import argparse
+import io
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
-from .core.processor import DocumentProcessor
-from .operations.full_description import FullDescriptionOperation
-from .schemas.config import ProcessorConfig
+from .core.reader import DocumentReader
 
 LOG_FORMAT = "%(asctime)s | %(name)s | %(message)s"
 LOG_DATEFMT = "%H:%M:%S"
 
-# Default parent dir for runs
-DEFAULT_OUTPUT_DIR = Path(
-    r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data"
-)
+
+def ensure_utf8_stdio() -> None:
+    """Replace stdout/stderr with UTF-8 wrappers on Windows (cp1251 console).
+
+    Avoids UnicodeEncodeError when printing Unicode to Windows console.
+    Call at the very start of main() before any print/log.
+    """
+    if sys.platform != "win32":
+        return
+    enc = getattr(sys.stdout, "encoding", None)
+    if enc and enc.lower() == "utf-8":
+        return
+    try:
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout = io.TextIOWrapper(
+                sys.stdout.buffer, encoding="utf-8", errors="replace"
+            )
+        if hasattr(sys.stderr, "buffer"):
+            sys.stderr = io.TextIOWrapper(
+                sys.stderr.buffer, encoding="utf-8", errors="replace"
+            )
+    except (AttributeError, OSError):
+        pass
 
 
-def setup_logging(log_level: str, log_file: Optional[Path] = None) -> None:
-    """Setup logging: console + optional file handler.
+def parse_pages_arg(raw: Optional[str]) -> Optional[List[int]]:
+    """Parse --pages string like '1,2,5-7' into sorted list of page numbers.
 
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
-        log_file: Path to log file (UTF-8). If None, console only.
-    """
-    level = getattr(logging, log_level.upper(), logging.INFO)
+        raw: Comma-separated numbers and ranges (e.g. "1,2,5-7")
 
-    # Console handler
+    Returns:
+        Sorted list of unique page numbers, or None if raw is None/empty (all pages)
+
+    Raises:
+        ValueError: If format is invalid (e.g. "1-2-3", "abc")
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+
+    result: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            parts = token.split("-", 1)
+            if len(parts) != 2:
+                raise ValueError(f"Invalid page range: {token!r}")
+            try:
+                lo, hi = int(parts[0].strip()), int(parts[1].strip())
+            except ValueError:
+                raise ValueError(f"Invalid page range: {token!r}")
+            if lo > hi:
+                raise ValueError(f"Invalid page range (lo > hi): {token!r}")
+            result.update(range(lo, hi + 1))
+        else:
+            try:
+                result.add(int(token))
+            except ValueError:
+                raise ValueError(f"Invalid page number: {token!r}")
+
+    if not result:
+        return None
+    return sorted(result)
+
+
+def setup_logging(log_level: str) -> None:
+    """Setup logging to console (UTF-8 after ensure_utf8_stdio)."""
+    level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=level,
         format=LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         stream=sys.stdout,
+        force=True,
     )
 
-    # File handler for the run directory
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file, encoding="utf-8")
-        fh.setLevel(level)
-        fh.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
-        logging.getLogger().addHandler(fh)
 
-
-def validate_arguments(pdf_path: Path, api_key: Optional[str]) -> None:
-    """Validate CLI arguments.
-
-    Raises:
-        SystemExit: If validation fails
-    """
-    if not pdf_path.exists():
-        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if not pdf_path.is_file():
-        print(f"Error: Path is not a file: {pdf_path}", file=sys.stderr)
-        sys.exit(1)
-
+def _check_api_key() -> None:
+    """Check GEMINI_API_KEY. Exit with 1 if missing."""
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print(
             "Error: GEMINI_API_KEY not found in environment. "
@@ -76,64 +111,140 @@ def validate_arguments(pdf_path: Path, api_key: Optional[str]) -> None:
         sys.exit(1)
 
 
-def create_run_dir(parent_dir: Path) -> Path:
-    """Create timestamped run subdirectory.
+def _check_pdf_path(pdf_path: Path) -> None:
+    """Validate PDF path. Exit with 1 if invalid."""
+    if not pdf_path.exists():
+        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
+        sys.exit(1)
+    if not pdf_path.is_file():
+        print(f"Error: Path is not a file: {pdf_path}", file=sys.stderr)
+        sys.exit(1)
 
-    Args:
-        parent_dir: Parent directory for runs
 
-    Returns:
-        Path to created run directory, e.g. parent_dir/run_2026-02-09_1715/
+def validate_arguments(pdf_path: Path, api_key: Optional[str]) -> None:
+    """Validate CLI arguments. Raises SystemExit(1) if invalid.
+
+    Kept for test compatibility.
     """
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    run_dir = parent_dir / f"run_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    if not pdf_path.exists():
+        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
+        sys.exit(1)
+    if not pdf_path.is_file():
+        print(f"Error: Path is not a file: {pdf_path}", file=sys.stderr)
+        sys.exit(1)
+    if not api_key:
+        print(
+            "Error: GEMINI_API_KEY not found in environment. "
+            "Please set it in .env file or as environment variable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
-def main() -> int:
-    """Main CLI entry point.
+def cmd_scan(args: argparse.Namespace) -> int:
+    """Level 0: VLM-only scan."""
+    _check_api_key()
+    _check_pdf_path(args.pdf_path)
 
-    Returns:
-        0 on success, 1 on error
-    """
-    parser = argparse.ArgumentParser(
-        description="Recognize PDF documents using VLM and OCR",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  vlm-ocr-reader document.pdf
-  vlm-ocr-reader document.pdf --output-dir ./my_runs
-  vlm-ocr-reader document.pdf --dpi 200 --log-level DEBUG
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
 
-Each run creates a timestamped subdirectory inside --output-dir:
-  output-dir/run_2026-02-09_1715/
-    cache/pages/       rendered page images
-    logs/run.log       full log with OCR request-result pairs
-    results/           YAML results
-        """,
-    )
+    try:
+        pages = parse_pages_arg(args.pages) if args.pages else None
+        reader = DocumentReader.open(args.pdf_path, args.workspace)
+        reader.scan(pages=pages)
+        status = reader.page_status()
+        logger.info(f"scan: {len(status)} pages processed")
+        print(f"Scan completed. Pages: {list(status.keys())}")
+        return 0
+    except Exception as e:
+        logger.exception(f"scan failed: {e}")
+        return 1
 
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Level 1: OCR resolve from Registry."""
+    _check_api_key()
+    _check_pdf_path(args.pdf_path)
+
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+
+    try:
+        pages = parse_pages_arg(args.pages) if args.pages else None
+        reader = DocumentReader.open(args.pdf_path, args.workspace)
+        reader.resolve(pages=pages)
+        logger.info("resolve completed")
+        print("Resolve completed.")
+        return 0
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        logger.exception(f"resolve failed: {e}")
+        return 1
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Level 2: Verify (stub for 015)."""
+    _check_api_key()
+    _check_pdf_path(args.pdf_path)
+
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+
+    try:
+        pages = parse_pages_arg(args.pages) if args.pages else None
+        reader = DocumentReader.open(args.pdf_path, args.workspace)
+        reader.verify(pages=pages)
+        logger.info("verify completed (stub)")
+        print("Verify completed (strategy stub for 015).")
+        return 0
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        logger.exception(f"verify failed: {e}")
+        return 1
+
+
+def cmd_full_description(args: argparse.Namespace) -> int:
+    """Scan + resolve all pages (backward compatibility)."""
+    _check_api_key()
+    _check_pdf_path(args.pdf_path)
+
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+
+    try:
+        reader = DocumentReader.open(args.pdf_path, args.workspace)
+        reader.scan()
+        reader.resolve()
+        data = reader.get_document_data()
+        logger.info("full-description completed")
+        print("Full-description completed.")
+        print(f"Text length: {len(data.text or '')} characters")
+        print(f"Headers: {len(data.structure.get('headers', []))}")
+        return 0
+    except Exception as e:
+        logger.exception(f"full-description failed: {e}")
+        return 1
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add common arguments to subparser."""
     parser.add_argument(
         "pdf_path",
         type=Path,
-        help="Path to PDF file to process",
+        help="Path to PDF file",
     )
-
     parser.add_argument(
-        "--output-dir", "-o",
+        "--workspace",
+        "-w",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Parent directory for run folders (default: {DEFAULT_OUTPUT_DIR})",
+        default=None,
+        help="Workspace directory for persistent state (memory mode if omitted)",
     )
-
-    parser.add_argument(
-        "--dpi",
-        type=int,
-        default=150,
-        help="DPI for PDF rendering (default: 150)",
-    )
-
     parser.add_argument(
         "--log-level",
         type=str,
@@ -142,96 +253,72 @@ Each run creates a timestamped subdirectory inside --output-dir:
         help="Logging level (default: INFO)",
     )
 
+
+def _add_pages_arg(parser: argparse.ArgumentParser) -> None:
+    """Add --pages argument for scan/resolve/verify."""
     parser.add_argument(
-        "--max-tool-workers",
-        type=int,
-        default=5,
-        help="Max parallel OCR workers per tool batch (default: 5)",
+        "--pages",
+        type=str,
+        default=None,
+        help="Page filter: comma-separated numbers and ranges, e.g. 1,2,5-7",
     )
 
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=100,
-        help="Max tool calling iterations per VLM invoke (default: 100)",
+
+def main() -> int:
+    """Main CLI entry point. Subcommands: scan, resolve, verify, full-description."""
+    ensure_utf8_stdio()
+
+    parser = argparse.ArgumentParser(
+        description="VLM OCR Document Reader - scan, resolve, verify, full-description",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  vlm-ocr-reader scan document.pdf --workspace ./ws
+  vlm-ocr-reader resolve document.pdf -w ./ws --pages 1,3-5
+  vlm-ocr-reader verify document.pdf
+  vlm-ocr-reader full-description document.pdf
+        """,
     )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # scan
+    p_scan = subparsers.add_parser("scan", help="Level 0: VLM-only scan")
+    _add_common_args(p_scan)
+    _add_pages_arg(p_scan)
+    p_scan.set_defaults(func=cmd_scan)
+
+    # resolve
+    p_resolve = subparsers.add_parser("resolve", help="Level 1: OCR resolve from Registry")
+    _add_common_args(p_resolve)
+    _add_pages_arg(p_resolve)
+    p_resolve.set_defaults(func=cmd_resolve)
+
+    # verify
+    p_verify = subparsers.add_parser("verify", help="Level 2: Verify (stub)")
+    _add_common_args(p_verify)
+    _add_pages_arg(p_verify)
+    p_verify.set_defaults(func=cmd_verify)
+
+    # full-description
+    p_full = subparsers.add_parser(
+        "full-description",
+        help="Scan + resolve all pages (backward compatibility)",
+    )
+    _add_common_args(p_full)
+    p_full.set_defaults(func=cmd_full_description)
 
     args = parser.parse_args()
 
     try:
-        # Load environment variables
-        load_dotenv()
-        api_key = os.getenv("GEMINI_API_KEY")
-
-        # Validate
-        validate_arguments(args.pdf_path, api_key)
-
-        # Create run directory
-        run_dir = create_run_dir(args.output_dir)
-        log_file = run_dir / "logs" / "run.log"
-
-        # Setup logging: console + file in run dir
-        setup_logging(args.log_level, log_file)
-        logger = logging.getLogger(__name__)
-
-        logger.info(f"Run directory: {run_dir}")
-        logger.info(f"Processing: {args.pdf_path}")
-        logger.info(f"DPI: {args.dpi}")
-
-        # Create processor with state_dir = run directory
-        config = ProcessorConfig(
-            state_dir=run_dir,
-            auto_save=True,
-            render_dpi=args.dpi,
-            log_level=args.log_level,
-            max_tool_workers=args.max_tool_workers,
-            max_iterations=args.max_iterations,
-        )
-
-        logger.info("Initializing DocumentProcessor...")
-        processor = DocumentProcessor(
-            source=args.pdf_path,
-            config=config,
-        )
-        logger.info(f"Document loaded: {processor.num_pages} pages")
-
-        # Execute operation
-        logger.info("Starting FullDescriptionOperation...")
-        operation = FullDescriptionOperation(processor)
-        result = operation.execute()
-
-        # Save result
-        processor.state_manager.save_operation_result(
-            "full_description",
-            {
-                "text": result.text,
-                "structure": result.structure,
-                "tables": result.tables,
-            },
-        )
-
-        # Summary
-        result_path = run_dir / "results" / "full_description.yaml"
-        print()
-        print("=" * 60)
-        print("Processing completed successfully!")
-        print("=" * 60)
-        print(f"Run directory:   {run_dir}")
-        print(f"Pages processed: {processor.num_pages}")
-        print(f"Text length:     {len(result.text or '')} characters")
-        print(f"Headers found:   {len(result.structure.get('headers', []))}")
-        print(f"Results:         {result_path}")
-        print(f"Log:             {log_file}")
-        print("=" * 60)
-
-        return 0
-
+        return args.func(args)
+    except SystemExit as e:
+        return int(e.code) if e.code is not None else 1
     except KeyboardInterrupt:
-        print("\nProcessing interrupted by user", file=sys.stderr)
+        print("\nInterrupted by user", file=sys.stderr)
         return 1
-
-    except Exception as e:
-        logging.getLogger(__name__).exception(f"Error during processing: {e}")
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
 

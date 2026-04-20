@@ -1,7 +1,7 @@
 """Tests for VLM Agent — real Gemini API calls.
 
-Requires GEMINI_API_KEY environment variable.
-Tests are skipped if the key is not set.
+Requires GEMINI_API_KEY in .env (real key, not dummy).
+Tests are skipped if the key is not set or is dummy.
 """
 
 import os
@@ -14,12 +14,21 @@ from vlm_ocr_doc_reader.core.vlm_agent import VLMAgent
 from vlm_ocr_doc_reader.schemas.config import VLMConfig
 from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
 
+_DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
+
+
+def _is_gemini_key_valid():
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    return bool(key) and key.lower() not in _DUMMY_KEYS
+
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 skip_no_gemini = pytest.mark.skipif(
-    not GEMINI_API_KEY, reason="GEMINI_API_KEY not set"
+    not _is_gemini_key_valid(), reason="GEMINI_API_KEY not set or is dummy"
 )
 
-TEST_PDF = Path(r"D:\_storage_cbr\020_docs_vision\08_vlm-ocr-doc-reader\03_data\test_document.pdf")
+_SRC_ROOT = Path(__file__).resolve().parent.parent.parent  # 02_src
+TEST_PDF = _SRC_ROOT / "03_data" / "test_document.pdf"
 
 
 @pytest.fixture(scope="module")

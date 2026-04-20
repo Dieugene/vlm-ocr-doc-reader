@@ -22,10 +22,17 @@ tests/
 
 ## Интеграционные тесты
 
-Требуют `.env` файл с API ключами:
+Требуют `.env` в корне проекта (worktree) с реальными API ключами:
 ```bash
 GEMINI_API_KEY=your_key_here
+QWEN_API_KEY=your_qwen_key   # или DASHSCOPE_API_KEY (алиас)
 ```
+
+**Важно:** Тесты с реальным API пропускаются (skipped), если:
+- `GEMINI_API_KEY` не задан
+- `GEMINI_API_KEY` — dummy-значение (`test`, `test-key`, `test-api-key-123`)
+
+Ключи загружаются из `.env` через `conftest` (load_dotenv из корня проекта).
 
 ### Запуск интеграционных тестов:
 

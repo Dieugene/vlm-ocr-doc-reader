@@ -158,7 +158,18 @@ class GeminiVLMClient(BaseVLMClient):
                 if hasattr(e, 'response') and e.response is not None:
                     status_code = e.response.status_code
 
-                is_retryable_error = status_code == 429 or (500 <= status_code < 600) if status_code else False
+                # Network/transient exceptions (timeouts, connection issues) are retryable
+                is_network_retryable = isinstance(
+                    e,
+                    (
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                    ),
+                )
+                is_status_retryable = (
+                    status_code == 429 or (500 <= status_code < 600)
+                ) if status_code else False
+                is_retryable_error = is_network_retryable or is_status_retryable
 
                 # Only retry on retryable errors if we have retries left
                 if is_retryable_error and attempt < self.config.max_retries:

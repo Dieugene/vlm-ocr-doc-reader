@@ -73,10 +73,16 @@ class TestOCRConfig:
         config = OCRConfig()
         assert config.api_key == "env_key"
 
+    @patch.dict("os.environ", {"QWEN_API_KEY": "", "DASHSCOPE_API_KEY": "dashscope_key"})
+    def test_config_dashscope_fallback(self):
+        """Test config uses DASHSCOPE_API_KEY as fallback when QWEN_API_KEY not set."""
+        config = OCRConfig()
+        assert config.api_key == "dashscope_key"
+
     def test_config_missing_api_key(self):
         """Test config raises error when API key not set."""
         with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="QWEN_API_KEY is required"):
+            with pytest.raises(ValueError, match="QWEN_API_KEY or DASHSCOPE_API_KEY"):
                 OCRConfig()
 
 
