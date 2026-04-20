@@ -1,11 +1,9 @@
 """
 VLM OCR Document Reader - Universal module for document processing via Vision Language Models.
 
-This package provides high-level operations for document analysis:
-- DocumentReader: Public API for document lifecycle (ADR-001 Resolution Levels)
-- FullDescriptionOperation: Extract text and structure (contract with project 07)
-- ClusteringOperation: Group pages by semantic similarity
-- TriageOperation: Find pages matching criteria
+Public API:
+- DocumentReader: primary entry point with Resolution Levels (scan/resolve/verify)
+- FullDescriptionOperation: legacy monolithic three-pass operation
 """
 
 __version__ = "0.1.0"

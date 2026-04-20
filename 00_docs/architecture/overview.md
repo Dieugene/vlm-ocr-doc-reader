@@ -1,201 +1,118 @@
-# Архитектура проекта vlm-ocr-doc-reader
+# Архитектура
 
-**Версия:** 3.0
-**Дата:** 2026-02-20
-**Статус:** v0.1.0 реализована, v0.2.0 (Resolution Levels) — в планировании
+Python-пакет для обработки документов через VLM (Gemini) и OCR (Qwen). Ключевой приём — разделение по уровням детальности (Resolution Levels): VLM быстро читает структуру и текст, OCR точечно извлекает критичные идентификаторы.
 
----
+## Resolution Levels
 
-## 1. Концептуальная модель
+Обработка страницы проходит один из трёх уровней. Уровень привязан к странице, а не к отдельной сущности.
 
-### Текущая (v0.1.0) и целевая (v0.2.0) архитектура
+| Level | Команда | Кто работает | Что делает |
+|-------|---------|--------------|------------|
+| 0 | `scan` | VLM | Читает страницы, возвращает текст + структуру + OCR Registry (что извлекать точно) |
+| 1 | `resolve` | OCR | Выполняет OCR по записям Registry для страниц |
+| 2 | `verify` | — | Интерфейс есть, стратегия majority voting не реализована |
 
-v0.1.0 работает через `FullDescriptionOperation → DocumentProcessor → VLMAgent`. Все три прохода (чтение, реестр, OCR) выполняются в одном VLM invoke.
+`resolve` не вызывает VLM: `DocumentReader` сам итерирует Registry и обращается к OCR-клиенту напрямую. Батчинг по странице — внутри `resolve`.
 
-v0.2.0 вводит **DocumentReader** как единственную точку входа и **Resolution Levels** для поэтапной обработки. См. ADR 001 (`decision_001_resolution_levels.md`).
+Обоснование выбора — см. [ADR 001](decision_001_resolution_levels.md).
 
-### Целевая структура (v0.2.0)
+## OCR Registry
 
-```mermaid
-graph TB
-    subgraph "Public API"
-        CLI["CLI<br/>scan / resolve / verify / full-description"]
-        DR[DocumentReader]
-    end
+Персистентный список целей извлечения. Запись:
 
-    subgraph "State"
-        DS[DocumentState]
-        REG[OCR Registry]
-        WS["Workspace<br/>{stem}_{hash6}/"]
-    end
-
-    subgraph "Processor (существующий, рефакторится)"
-        DP[DocumentProcessor]
-
-        subgraph "VLM Agent"
-            Agent[VLMAgent]
-            VLMClient[GeminiVLMClient]
-        end
-
-        subgraph "OCR"
-            OCRTool[OCRTool]
-            OCRClient[QwenOCRClient]
-        end
-
-        SM[StateManager]
-    end
-
-    CLI --> DR
-    DR --> DS
-    DS --> REG
-    DS --> WS
-    DR -->|"scan()"| DP
-    DR -->|"resolve()"| OCRClient
-    DR -->|"verify()"| OCRClient
-    DP --> Agent
-    Agent --> VLMClient
-    Agent -.tool calling.-> OCRTool
-    OCRTool --> OCRClient
-    OCRTool -.load_page.-> SM
-    DR --> SM
+```
+page_num    — номер страницы (1-based)
+entity_id   — уникальный ключ для upsert
+prompt      — что искать ("ОГРН организации")
+resolution  — 0 (создано при scan), 1 (resolved), 2 (verified)
+value       — извлечённое значение (null до resolve)
+context     — ориентир рядом (опционально)
+verified    — прошла ли верификация
+confidence  — результат верификации (например "3/3")
 ```
 
-**Ключевое изменение:** Resolve и Verify обходят VLM Agent — DocumentReader итерирует OCR Registry и вызывает OCR Client напрямую.
+Создаётся при `scan`, пополняется при `resolve`, обновляется при `verify`.
 
-### Разделение ответственности
+## Workspace
 
-- **DocumentReader** — публичный API, lifecycle документа
-- **DocumentState** — модель данных (что мы знаем: page states, OCR Registry)
-- **DocumentProcessor** — оркестрация VLM (используется только при Scan)
-- **Operations** — стратегии анализа (FullDescription, Triage, Extraction)
+Директория для персистентного состояния. Документы живут в поддиректориях `{stem}_{hash6}/`, где `hash6` — первые 6 символов SHA256 содержимого файла.
 
-### Resolution Levels (ADR 001)
+```
+workspace/
+├── contract_a1b2c3/
+│   ├── pages/             рендеры страниц (PNG)
+│   ├── state.json         page_states + metadata + ocr_registry
+│   ├── registry.json      дубликат ocr_registry (для удобства)
+│   ├── vlm_responses/     сырые VLM-ответы
+│   └── results/           YAML с DocumentData
+```
 
-| Level | Название | Что делает | VLM | OCR |
-|-------|----------|-----------|-----|-----|
-| 0 | Scan | Чтение текста, структуры. Побочный продукт: OCR Registry | Да | Нет |
-| 1 | Resolve | Исполнение OCR Registry для указанных страниц | Нет | Да |
-| 2 | Verify | N параллельных OCR-вызовов, majority voting | Нет | Да (N раз) |
+Следствия идентификации по содержимому:
 
-Гранулярность: level привязан к **странице**. При Resolve резолвятся все сущности на странице.
+- Файл переместили → хэш тот же → состояние подхватывается.
+- Файл изменили → другой хэш → новая поддиректория, чистый старт.
+- Без `workspace` — `MemoryStorage`, ничего не персистируется.
 
----
-
-## 2. Текущая структура модулей (v0.1.0)
+## Модули
 
 ```
 vlm_ocr_doc_reader/
-├── __init__.py                    # Public API
-├── cli.py                         # CLI entry point
 ├── core/
-│   ├── processor.py               # DocumentProcessor
-│   ├── vlm_agent.py               # VLMAgent (tool calling, ThreadPoolExecutor)
-│   ├── vlm_client.py              # GeminiVLMClient (contents support)
-│   ├── ocr_tool.py                # OCRTool (state_manager, ask_ocr)
-│   ├── ocr_client.py              # QwenOCRClient
-│   └── state.py                   # StateManager, MemoryStorage, DiskStorage
+│   ├── reader.py        DocumentReader — публичный API (scan/resolve/verify)
+│   ├── processor.py     DocumentProcessor — рендер + VLM agent (используется при scan)
+│   ├── vlm_agent.py     VLMAgent — conversation history, tool calling, ThreadPoolExecutor
+│   ├── vlm_client.py    GeminiVLMClient
+│   ├── ocr_tool.py      OCRTool — tool для VLM agent (ask_ocr)
+│   ├── ocr_client.py    QwenOCRClient
+│   └── state.py         StateManager + WorkspaceStorage + OCRRegistryEntry
 ├── operations/
-│   ├── base.py                    # BaseOperation
-│   └── full_description.py        # FullDescriptionOperation (three-pass)
+│   ├── base.py          BaseOperation
+│   ├── full_description.py  FullDescriptionOperation — монолитный three-pass (legacy API)
+│   └── scan.py          SCAN_PROMPT_TEXT + parser/нормализатор scan-ответа
 ├── preprocessing/
-│   └── renderer.py                # PDFRenderer ([G{N}] markers)
+│   └── renderer.py      PDFRenderer (маркеры [G{N}] в левом верхнем углу)
 ├── schemas/
-│   ├── document.py                # DocumentData, HeaderInfo, TableInfo
-│   ├── common.py                  # PageInfo
-│   └── config.py                  # ProcessorConfig, VLMConfig, OCRConfig
-└── utils/
-    └── normalization.py           # OCR normalization
+│   ├── config.py        ProcessorConfig, VLMConfig, OCRConfig
+│   ├── document.py      DocumentData, HeaderInfo, TableInfo
+│   └── common.py        PageInfo
+├── utils/
+│   └── normalization.py нормализация цифр OCR (O→0 и т.п.)
+└── cli.py               subcommands: scan, resolve, verify, full-description
 ```
 
-### Планируемые изменения для v0.2.0
+## Публичный API
 
-Новые компоненты:
-- `DocumentReader` — публичный API (scan/resolve/verify)
-- `DocumentState` с `OCRRegistry` — персистентная модель знаний
-- Workspace — директория с `{stem}_{content_hash6}/` поддиректориями
-
-Рефакторинг:
-- `DocumentProcessor` → подчинён DocumentReader, используется только при Scan
-- `StateManager` → расширяется для хранения OCR Registry и page states
-- `full_description.py` PROMPT_TEXT → разделяется на промпты по resolution levels
-- CLI → команды `scan`, `resolve`, `verify`, `full-description` (обратная совместимость)
-
----
-
-## 3. Ключевые архитектурные решения
-
-### Действующие (v0.1.0)
-
-**Agent → Client relation:** VLM Agent использует VLM Client, OCR Tool использует OCR Client.
-
-**Conversation history:** VLM Agent хранит `self.messages`, передает `contents=self.messages` — полная история диалога Gemini.
-
-**Uniform tool calling:** VLM Agent не знает про OCR — все tools вызываются через `handler(**func_args)`.
-
-**Parallel tool execution:** ThreadPoolExecutor(max_workers=5), порядок сохраняется через `pool.map()`.
-
-**Page Markers [G{N}]:** PDFRenderer штампует маркеры в верхнем левом углу.
-
-**Init Order:** StateManager → VLMClient → OCRClient+OCRTool → VLMAgent → Pages.
-
-### Принятые для v0.2.0 (ADR 001)
-
-**Resolution Levels:** Scan (VLM only) → Resolve (OCR only) → Verify (OCR N раз). См. ADR 001.
-
-**OCR Registry:** Персистентный артефакт — список сущностей с page_num, prompt, value, resolution level. Создаётся при Scan, заполняется при Resolve.
-
-**DocumentReader:** Единственная точка входа. CLI, API, интеграции — всё через него.
-
-**Workspace:** Директория с поддиректориями `{stem}_{content_hash6}/`. Идентификация по содержимому, не по имени файла.
-
-**Resolve без VLM:** DocumentReader сам итерирует Registry и вызывает OCR Client напрямую. Батчинг становится тривиальным.
-
----
-
-## 4. Интеграционные точки
-
-### Контракт с 07_agentic-doc-processing
+Главный вход:
 
 ```python
-@dataclass
-class DocumentData:
-    text: str                          # Полный текст (с OCR-верифицированными данными)
-    structure: Dict[str, Any]          # {"headers": [...]}
-    tables: List[Dict[str, Any]]       # Пустой в v0.1.0
+from vlm_ocr_doc_reader import DocumentReader
+
+reader = DocumentReader.open(pdf_path, workspace=None)  # workspace=None → memory mode
+reader.scan(pages=None)                                  # None → все страницы
+reader.resolve(pages=None)
+reader.verify(pages=None)                                # stub
+reader.page_status()                                     # {page_num: "scan"|"resolved"|"verified"}
+reader.pending_entities(page=None)                       # список OCRRegistryEntry с resolution < 1
+reader.get_document_data() -> DocumentData
 ```
 
-Доступ через `reader.get_document_data()` (v0.2.0) или `FullDescriptionOperation.execute()` (v0.1.0).
+Legacy-путь (монолитный VLM invoke с tool calling OCR):
 
-### CLI (текущий v0.1.0)
+```python
+from vlm_ocr_doc_reader import DocumentProcessor, FullDescriptionOperation
 
-```bash
-vlm-ocr-reader <pdf_path> [--output-dir DIR] [--dpi DPI] [--max-tool-workers N] [--max-iterations N]
+processor = DocumentProcessor(source=Path("doc.pdf"))
+data = FullDescriptionOperation(processor).execute()
 ```
 
-### CLI (целевой v0.2.0)
+## Контракт с agentic-doc-processing
 
-```bash
-vlm-ocr-reader scan <pdf_path> --workspace ./workspace
-vlm-ocr-reader resolve <pdf_path> --workspace ./workspace [--pages 48,49]
-vlm-ocr-reader verify <pdf_path> --workspace ./workspace [--pages 48]
-vlm-ocr-reader full-description <pdf_path>   # scan + resolve all (обратная совместимость)
-```
+`reader.get_document_data()` возвращает `DocumentData(text, structure, tables)` — стабильный контракт для соседнего подпроекта `01_projects/agentic-doc-processing`. Поле `tables` всегда пусто в текущей реализации.
 
----
+## Известные ограничения
 
-## 5. Ограничения v0.1.0
-
-- Только Gemini VLM / Qwen OCR
-- Только FullDescriptionOperation
-- OCR вызывается по одной сущности через VLM tool calling
-- Общее время 8-страничного документа: ~6 мин
-
----
-
-## История изменений
-
-| Дата | Версия | Изменения | Автор |
-|------|--------|-----------|-------|
-| 2026-02-20 | 3.0 | Целевая архитектура v0.2.0: Resolution Levels, DocumentReader, Workspace, OCR Registry, Resolve без VLM (ADR 001) | Tech Lead |
-| 2026-02-20 | 2.0 | Фактическая архитектура v0.1.0: conversation history, parallel OCR, three-pass, [G{N}] | Tech Lead |
-| 2026-01-27 | 1.0 | Черновик архитектуры | Architect |
+- VLM: только Gemini; OCR: только Qwen. Базовые классы `BaseVLMClient`/`BaseOCRClient` оставляют место для других провайдеров, но дополнительных реализаций нет.
+- `verify()` не реализует стратегию — лишь нормализует диапазон страниц и логирует.
+- DPI рендеринга жёстко 150 (`render_dpi` в `ProcessorConfig`, не используется как переменная через CLI).
+- `DocumentData.tables` всегда пуст.
+- `ClusterInfo` и `TriageResult` — зарезервированные типы, соответствующих операций нет.
