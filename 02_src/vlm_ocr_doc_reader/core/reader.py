@@ -62,7 +62,7 @@ class DocumentReader:
 
         Raises:
             FileNotFoundError: If PDF file does not exist
-            ValueError: If GEMINI_API_KEY is not set in environment
+            ValueError: If DASHSCOPE_API_KEY (or QWEN_API_KEY) is not set
         """
         path = Path(pdf_path)
         if not path.exists():
@@ -157,9 +157,19 @@ class DocumentReader:
                     f"for batch {batch_pages}"
                 )
 
+            image_to_page = ", ".join(
+                f"изображение #{i + 1} — страница {p}"
+                for i, p in enumerate(batch_pages)
+            )
             user_prompt = (
-                f"Номера страниц: {batch_pages}. "
-                "Проанализируй изображения и верни JSON в указанном формате."
+                f"Тебе передано {len(batch_pages)} изображений в следующем порядке: "
+                f"{image_to_page}. Это и есть соответствие между позицией изображения "
+                "в запросе и номером страницы документа. Маркер [G{N}] в левом верхнем "
+                "углу каждой картинки — проверочный индикатор того же номера. "
+                "Для КАЖДОЙ записи в ocr_registry обязательно укажи page_num строго из "
+                f"списка {batch_pages}, соответствующий той картинке, на которой это "
+                "значение физически видно. Не приписывай сущности со второй картинки "
+                "первой и наоборот. Верни JSON в указанном формате."
             )
             response = vlm_agent.invoke_no_tools(user_prompt, images)
             text = response.get("text")

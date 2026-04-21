@@ -27,7 +27,7 @@ def mock_pdf_path(tmp_path):
 @pytest.fixture
 def mock_env_with_api_key():
     """Mock environment with API key."""
-    return {"GEMINI_API_KEY": "test-api-key-123"}
+    return {"DASHSCOPE_API_KEY": "test-api-key-123"}
 
 
 class TestSetupLogging:
@@ -57,14 +57,14 @@ class TestValidateArguments:
 
     def test_validate_valid_arguments(self, mock_pdf_path, mock_env_with_api_key):
         """Test validation with valid arguments."""
-        validate_arguments(mock_pdf_path, mock_env_with_api_key["GEMINI_API_KEY"])
+        validate_arguments(mock_pdf_path, mock_env_with_api_key["DASHSCOPE_API_KEY"])
 
     def test_validate_missing_pdf(self, mock_pdf_path, mock_env_with_api_key, capsys):
         """Test validation with missing PDF file."""
         non_existent = mock_pdf_path.parent / "non_existent.pdf"
 
         with pytest.raises(SystemExit) as exc_info:
-            validate_arguments(non_existent, mock_env_with_api_key["GEMINI_API_KEY"])
+            validate_arguments(non_existent, mock_env_with_api_key["DASHSCOPE_API_KEY"])
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -73,7 +73,7 @@ class TestValidateArguments:
     def test_validate_pdf_is_directory(self, tmp_path, mock_env_with_api_key, capsys):
         """Test validation when PDF path is a directory."""
         with pytest.raises(SystemExit) as exc_info:
-            validate_arguments(tmp_path, mock_env_with_api_key["GEMINI_API_KEY"])
+            validate_arguments(tmp_path, mock_env_with_api_key["DASHSCOPE_API_KEY"])
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -86,7 +86,8 @@ class TestValidateArguments:
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
-        assert "GEMINI_API_KEY not found" in captured.err
+        assert "DASHSCOPE_API_KEY" in captured.err
+        assert "not found" in captured.err
 
 
 class TestParsePagesArg:
@@ -153,7 +154,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
         """Test scan subcommand success."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader = MagicMock()
         mock_reader.page_status.return_value = {1: "scan", 2: "scan"}
         mock_reader_class.open.return_value = mock_reader
@@ -172,7 +173,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch, tmp_path
     ):
         """Test resolve subcommand with --pages."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader = MagicMock()
         mock_reader_class.open.return_value = mock_reader
 
@@ -200,7 +201,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
         """Test full-description subcommand (scan + resolve)."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader = MagicMock()
         mock_reader.get_document_data.return_value = MagicMock(
             text="Sample text",
@@ -224,7 +225,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
         """full-description should fail-fast when scan operation fails."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader = MagicMock()
         mock_reader.scan.side_effect = RuntimeError("scan timeout")
         mock_reader_class.open.return_value = mock_reader
@@ -240,7 +241,7 @@ class TestMainSubcommands:
     @patch("sys.argv", ["vlm-ocr-reader", "scan", "non_existent.pdf"])
     def test_main_pdf_not_found(self, mock_load_dotenv, monkeypatch, tmp_path, capsys):
         """Test main with non-existent PDF."""
-        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
         non_existent = tmp_path / "non_existent.pdf"
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=non_existent):
@@ -254,14 +255,16 @@ class TestMainSubcommands:
     @patch("sys.argv", ["vlm-ocr-reader", "scan", "test.pdf"])
     def test_main_missing_api_key(self, mock_load_dotenv, mock_pdf_path, monkeypatch, capsys):
         """Test main with missing API key."""
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        monkeypatch.delenv("QWEN_API_KEY", raising=False)
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
             result = main()
 
         assert result == 1
         captured = capsys.readouterr()
-        assert "GEMINI_API_KEY not found" in captured.err
+        assert "DASHSCOPE_API_KEY" in captured.err
+        assert "not found" in captured.err
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
     @patch("vlm_ocr_doc_reader.cli.DocumentReader")
@@ -270,7 +273,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
         """Test main with keyboard interrupt."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader_class.open.side_effect = KeyboardInterrupt()
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):
@@ -285,7 +288,7 @@ class TestMainSubcommands:
         self, mock_reader_class, mock_load_dotenv, mock_pdf_path, mock_env_with_api_key, monkeypatch
     ):
         """Test main with exception."""
-        monkeypatch.setenv("GEMINI_API_KEY", mock_env_with_api_key["GEMINI_API_KEY"])
+        monkeypatch.setenv("DASHSCOPE_API_KEY", mock_env_with_api_key["DASHSCOPE_API_KEY"])
         mock_reader_class.open.side_effect = RuntimeError("Test error")
 
         with patch("vlm_ocr_doc_reader.cli.Path", return_value=mock_pdf_path):

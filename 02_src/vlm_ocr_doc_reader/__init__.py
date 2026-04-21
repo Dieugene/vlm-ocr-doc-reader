@@ -11,7 +11,8 @@ __version__ = "0.1.0"
 # Core classes
 from .core.reader import DocumentReader
 from .core.processor import DocumentProcessor
-from .core.vlm_client import BaseVLMClient, GeminiVLMClient
+from .core.vlm_client import BaseVLMClient
+from .core.qwen_vlm_client import QwenVLMClient
 from .core.vlm_agent import VLMAgent
 from .core.ocr_client import BaseOCRClient, QwenOCRClient, OCRConfig
 from .core.ocr_tool import OCRTool
@@ -37,7 +38,7 @@ __all__ = [
     "DocumentReader",
     "DocumentProcessor",
     "BaseVLMClient",
-    "GeminiVLMClient",
+    "QwenVLMClient",
     "VLMAgent",
     "BaseOCRClient",
     "QwenOCRClient",

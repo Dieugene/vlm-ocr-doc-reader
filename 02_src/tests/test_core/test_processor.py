@@ -1,6 +1,6 @@
 """Tests for DocumentProcessor — real API calls.
 
-Requires GEMINI_API_KEY in .env (real key, not dummy).
+Requires DASHSCOPE_API_KEY (or QWEN_API_KEY) in .env.
 Tests are skipped if the key is not set or is dummy.
 """
 
@@ -15,21 +15,21 @@ from vlm_ocr_doc_reader.core.state import MemoryStorage, StateManager
 _DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
 
 
-def _is_gemini_key_valid():
-    key = os.getenv("GEMINI_API_KEY", "").strip()
+def _is_dashscope_key_valid():
+    key = (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY") or "").strip()
     return bool(key) and key.lower() not in _DUMMY_KEYS
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-skip_no_gemini = pytest.mark.skipif(
-    not _is_gemini_key_valid(), reason="GEMINI_API_KEY not set or is dummy"
+skip_no_api = pytest.mark.skipif(
+    not _is_dashscope_key_valid(),
+    reason="DASHSCOPE_API_KEY (or QWEN_API_KEY) not set or is dummy",
 )
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent.parent  # 02_src
 TEST_PDF = _SRC_ROOT / "03_data" / "test_document.pdf"
 
 
-@skip_no_gemini
+@skip_no_api
 class TestDocumentProcessorReal:
     """Real API tests for DocumentProcessor."""
 

@@ -1,6 +1,6 @@
-"""Tests for VLM Agent — real Gemini API calls.
+"""Tests for VLMAgent — real DashScope / Qwen VLM calls.
 
-Requires GEMINI_API_KEY in .env (real key, not dummy).
+Requires DASHSCOPE_API_KEY (or QWEN_API_KEY) in .env.
 Tests are skipped if the key is not set or is dummy.
 """
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from vlm_ocr_doc_reader.core.vlm_client import GeminiVLMClient
+from vlm_ocr_doc_reader.core.qwen_vlm_client import QwenVLMClient
 from vlm_ocr_doc_reader.core.vlm_agent import VLMAgent
 from vlm_ocr_doc_reader.schemas.config import VLMConfig
 from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
@@ -17,14 +17,15 @@ from vlm_ocr_doc_reader.preprocessing.renderer import PDFRenderer, RenderConfig
 _DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
 
 
-def _is_gemini_key_valid():
-    key = os.getenv("GEMINI_API_KEY", "").strip()
+def _is_dashscope_key_valid():
+    key = (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY") or "").strip()
     return bool(key) and key.lower() not in _DUMMY_KEYS
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-skip_no_gemini = pytest.mark.skipif(
-    not _is_gemini_key_valid(), reason="GEMINI_API_KEY not set or is dummy"
+API_KEY = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
+skip_no_api = pytest.mark.skipif(
+    not _is_dashscope_key_valid(),
+    reason="DASHSCOPE_API_KEY (or QWEN_API_KEY) not set or is dummy",
 )
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent.parent  # 02_src
@@ -41,17 +42,17 @@ def page_images():
 
 @pytest.fixture
 def vlm_client():
-    """Create real GeminiVLMClient."""
-    config = VLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash")
-    return GeminiVLMClient(config)
+    """Create real QwenVLMClient."""
+    config = VLMConfig(api_key=API_KEY)
+    return QwenVLMClient(config)
 
 
-@skip_no_gemini
+@skip_no_api
 class TestVLMAgentReal:
     """Real API tests for VLMAgent."""
 
     def test_invoke_no_tools(self, vlm_client, page_images):
-        """Test text extraction without tools — agent returns text in 1 iteration."""
+        """Text extraction without tools — agent returns text in 1 iteration."""
         agent = VLMAgent(vlm_client)
         img = page_images[1]
 
@@ -66,29 +67,30 @@ class TestVLMAgentReal:
         assert result.get("function_results") is None
 
     def test_invoke_with_tool(self, vlm_client, page_images):
-        """Test that agent calls ask_ocr tool and receives its result."""
+        """Agent registers and may invoke an ask_ocr-shaped tool."""
         agent = VLMAgent(vlm_client)
         img = page_images[1]
 
-        # Register a simple echo tool as ask_ocr
         tool_def = {
-            "function_declarations": [
-                {
-                    "name": "ask_ocr",
-                    "description": (
-                        "Точное извлечение одного значения со страницы документа через OCR. "
-                        "Используй для URL, ID, ФИО."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "page_num": {"type": "integer", "description": "Номер страницы"},
-                            "prompt": {"type": "string", "description": "Что извлечь"},
+            "type": "function",
+            "function": {
+                "name": "ask_ocr",
+                "description": (
+                    "Точное извлечение одного значения со страницы документа через "
+                    "OCR. Используй для URL, ID, ФИО."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page_num": {
+                            "type": "integer",
+                            "description": "Номер страницы",
                         },
-                        "required": ["page_num", "prompt"],
+                        "prompt": {"type": "string", "description": "Что извлечь"},
                     },
-                }
-            ]
+                    "required": ["page_num", "prompt"],
+                },
+            },
         }
 
         def mock_ocr_handler(page_num: int, prompt: str):
@@ -106,24 +108,21 @@ class TestVLMAgentReal:
             [img],
         )
 
+        # Agent must return text (model decides whether to invoke the tool)
         assert result["text"] is not None
-        # Agent should have used the tool (iterations > 1) or decided not to
-        # At minimum we get a text response
         assert isinstance(result["text"], str)
 
     def test_multi_turn(self, vlm_client, page_images):
-        """Test two sequential invocations — agent remembers history."""
+        """Two sequential invocations — agent remembers prior turn."""
         agent = VLMAgent(vlm_client)
         img = page_images[1]
 
-        # First invocation
         result1 = agent.invoke(
             "Запомни кодовое слово: БАНАН. Ответь только 'запомнил'.",
             [img],
         )
         assert result1["text"] is not None
 
-        # Second invocation — no images, agent should remember
         result2 = agent.invoke(
             "Какое кодовое слово я просил запомнить? Ответь одним словом.",
             [],

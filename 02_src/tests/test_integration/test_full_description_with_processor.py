@@ -19,15 +19,15 @@ from vlm_ocr_doc_reader.schemas import DocumentData
 _DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})
 
 
-def _is_gemini_key_valid():
-    key = os.getenv("GEMINI_API_KEY", "").strip()
+def _is_dashscope_key_valid():
+    key = (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY") or "").strip()
     return bool(key) and key.lower() not in _DUMMY_KEYS
 
 
 # Skip tests if API key not available or is dummy
 pytestmark = pytest.mark.skipif(
-    not _is_gemini_key_valid(),
-    reason="GEMINI_API_KEY not set or is dummy - set real key in .env"
+    not _is_dashscope_key_valid(),
+    reason="DASHSCOPE_API_KEY (or QWEN_API_KEY) not set or is dummy - set real key in .env",
 )
 
 

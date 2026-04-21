@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from ..schemas.common import PageInfo
 from ..schemas.config import ProcessorConfig, VLMConfig
 from ..preprocessing.renderer import PDFRenderer, RenderConfig
-from .vlm_client import BaseVLMClient, GeminiVLMClient
+from .qwen_vlm_client import QwenVLMClient
 from .state import StateManager, MemoryStorage, DiskStorage
 from .vlm_agent import VLMAgent
 from .ocr_client import BaseOCRClient, QwenOCRClient, OCRConfig
@@ -81,13 +81,13 @@ class DocumentProcessor:
 
         # 2. Initialize VLM Agent if not provided
         if vlm_agent is None:
-            # Need API key from environment
+            # Need API key from environment (Qwen VLM via DashScope)
             load_dotenv()
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
 
             if not api_key:
                 raise ValueError(
-                    "GEMINI_API_KEY not found in environment. "
+                    "DASHSCOPE_API_KEY (or QWEN_API_KEY) not found in environment. "
                     "Please set it in .env file or pass vlm_agent explicitly."
                 )
 
@@ -99,7 +99,7 @@ class DocumentProcessor:
                 timeout_sec=vlm_timeout_sec,
                 max_retries=vlm_max_retries,
             )
-            vlm_client = GeminiVLMClient(vlm_config)
+            vlm_client = QwenVLMClient(vlm_config)
 
             # Create OCR client and tool (optional, if QWEN_API_KEY is set)
             try:

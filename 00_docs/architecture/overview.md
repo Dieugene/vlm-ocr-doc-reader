@@ -1,6 +1,6 @@
 # Архитектура
 
-Python-пакет для обработки документов через VLM (Gemini) и OCR (Qwen). Ключевой приём — разделение по уровням детальности (Resolution Levels): VLM быстро читает структуру и текст, OCR точечно извлекает критичные идентификаторы.
+Python-пакет для обработки документов через VLM и OCR — оба провайдера сейчас Qwen через DashScope (`qwen3-vl-flash` для чтения структуры, `qwen-vl-plus` для точечного OCR). Ключевой приём — разделение по уровням детальности (Resolution Levels): VLM быстро читает структуру и текст, OCR точечно извлекает критичные идентификаторы.
 
 ## Resolution Levels
 
@@ -58,27 +58,30 @@ workspace/
 ```
 vlm_ocr_doc_reader/
 ├── core/
-│   ├── reader.py        DocumentReader — публичный API (scan/resolve/verify)
-│   ├── processor.py     DocumentProcessor — рендер + VLM agent (используется при scan)
-│   ├── vlm_agent.py     VLMAgent — conversation history, tool calling, ThreadPoolExecutor
-│   ├── vlm_client.py    GeminiVLMClient
-│   ├── ocr_tool.py      OCRTool — tool для VLM agent (ask_ocr)
-│   ├── ocr_client.py    QwenOCRClient
-│   └── state.py         StateManager + WorkspaceStorage + OCRRegistryEntry
+│   ├── reader.py            DocumentReader — публичный API (scan/resolve/verify)
+│   ├── processor.py         DocumentProcessor — рендер + VLM agent (используется при scan)
+│   ├── vlm_agent.py         VLMAgent — conversation + tool-calling loop (OpenAI-style messages)
+│   ├── vlm_client.py        BaseVLMClient — провайдер-нейтральный контракт
+│   ├── qwen_vlm_client.py   QwenVLMClient (DashScope OpenAI-compatible endpoint)
+│   ├── ocr_tool.py          OCRTool — tool для VLM agent (ask_ocr)
+│   ├── ocr_client.py        QwenOCRClient
+│   └── state.py             StateManager + WorkspaceStorage + OCRRegistryEntry
 ├── operations/
-│   ├── base.py          BaseOperation
+│   ├── base.py              BaseOperation
 │   ├── full_description.py  FullDescriptionOperation — монолитный three-pass (legacy API)
-│   └── scan.py          SCAN_PROMPT_TEXT + parser/нормализатор scan-ответа
+│   └── scan.py              SCAN_PROMPT_TEXT + parser/нормализатор scan-ответа
 ├── preprocessing/
-│   └── renderer.py      PDFRenderer (маркеры [G{N}] в левом верхнем углу)
+│   └── renderer.py          PDFRenderer (маркеры [G{N}] в левом верхнем углу)
 ├── schemas/
-│   ├── config.py        ProcessorConfig, VLMConfig, OCRConfig
-│   ├── document.py      DocumentData, HeaderInfo, TableInfo
-│   └── common.py        PageInfo
+│   ├── config.py            ProcessorConfig, VLMConfig, OCRConfig
+│   ├── document.py          DocumentData, HeaderInfo, TableInfo
+│   └── common.py            PageInfo
 ├── utils/
-│   └── normalization.py нормализация цифр OCR (O→0 и т.п.)
-└── cli.py               subcommands: scan, resolve, verify, full-description
+│   └── normalization.py     нормализация цифр OCR (O→0 и т.п.)
+└── cli.py                   subcommands: scan, resolve, verify, full-description
 ```
+
+Внутренний формат сообщений в `VLMAgent` — OpenAI-style (`messages` с `role`/`content`, `tool_calls`, `tool_call_id`). Это продуктовый контракт, а не проекция конкретного провайдера; `QwenVLMClient` — тонкий pass-through, т.к. DashScope принимает этот формат натив. Новые провайдеры должны конвертировать свой формат в/из этого внутри своего клиента.
 
 ## Публичный API
 
@@ -111,7 +114,7 @@ data = FullDescriptionOperation(processor).execute()
 
 ## Известные ограничения
 
-- VLM: только Gemini; OCR: только Qwen. Базовые классы `BaseVLMClient`/`BaseOCRClient` оставляют место для других провайдеров, но дополнительных реализаций нет.
+- VLM и OCR: только Qwen (`qwen3-vl-flash` и `qwen-vl-plus` соответственно), оба через DashScope и единый API-ключ. `BaseVLMClient`/`BaseOCRClient` оставляют место для других провайдеров, но реализаций нет.
 - `verify()` не реализует стратегию — лишь нормализует диапазон страниц и логирует.
 - DPI рендеринга жёстко 150 (`render_dpi` в `ProcessorConfig`, не используется как переменная через CLI).
 - `DocumentData.tables` всегда пуст.

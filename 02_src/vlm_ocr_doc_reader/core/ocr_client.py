@@ -38,7 +38,7 @@ class OCRConfig:
         backoff_base: Base for exponential backoff calculation
     """
     api_key: Optional[str] = None
-    model: str = "qwen-vl-plus"
+    model: str = "qwen-vl-ocr-2025-11-20"
     timeout_sec: int = 60
     max_retries: int = 3
     backoff_base: float = 1.5

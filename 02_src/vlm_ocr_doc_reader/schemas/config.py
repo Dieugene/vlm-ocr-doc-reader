@@ -13,15 +13,15 @@ class VLMConfig:
     """Configuration for VLM client.
 
     Attributes:
-        api_key: API key for Gemini API
-        model: Model name (default: gemini-2.5-flash)
+        api_key: DashScope API key (Qwen VLM)
+        model: Model name (default: qwen3-vl-flash)
         timeout_sec: Request timeout in seconds
         max_retries: Maximum number of retry attempts
         backoff_base: Base for exponential backoff calculation
         min_interval_s: Minimum interval between requests (throttling)
     """
     api_key: str
-    model: str = "gemini-2.5-flash"
+    model: str = "qwen3-vl-flash"
     timeout_sec: int = 120
     max_retries: int = 3
     backoff_base: float = 1.5

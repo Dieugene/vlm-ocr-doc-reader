@@ -27,7 +27,8 @@ from .ocr_client import (
     QwenOCRClient,
 )
 from .ocr_tool import OCRTool
-from .vlm_client import BaseVLMClient, GeminiVLMClient
+from .vlm_client import BaseVLMClient
+from .qwen_vlm_client import QwenVLMClient
 from .vlm_agent import VLMAgent
 from .processor import DocumentProcessor
 from .reader import DocumentReader
@@ -60,7 +61,7 @@ __all__ = [
     "OCRTool",
     # VLM
     "BaseVLMClient",
-    "GeminiVLMClient",
+    "QwenVLMClient",
     "VLMAgent",
     "DocumentProcessor",
     "DocumentReader",

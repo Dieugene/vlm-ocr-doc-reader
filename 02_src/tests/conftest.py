@@ -12,9 +12,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
-def is_gemini_key_valid() -> bool:
-    """Return True if GEMINI_API_KEY is set and not a known dummy value."""
-    key = os.getenv("GEMINI_API_KEY", "").strip()
+def is_dashscope_key_valid() -> bool:
+    """Return True if DASHSCOPE_API_KEY / QWEN_API_KEY is set and not a dummy."""
+    key = (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY") or "").strip()
     if not key:
         return False
     _DUMMY_KEYS = frozenset({"test", "test-key", "test-api-key-123"})

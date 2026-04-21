@@ -99,12 +99,12 @@ def setup_logging(log_level: str) -> None:
 
 
 def _check_api_key() -> None:
-    """Check GEMINI_API_KEY. Exit with 1 if missing."""
+    """Check DASHSCOPE_API_KEY (or QWEN_API_KEY). Exit with 1 if missing."""
     load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
     if not api_key:
         print(
-            "Error: GEMINI_API_KEY not found in environment. "
+            "Error: DASHSCOPE_API_KEY (or QWEN_API_KEY) not found in environment. "
             "Please set it in .env file or as environment variable.",
             file=sys.stderr,
         )
@@ -134,7 +134,7 @@ def validate_arguments(pdf_path: Path, api_key: Optional[str]) -> None:
         sys.exit(1)
     if not api_key:
         print(
-            "Error: GEMINI_API_KEY not found in environment. "
+            "Error: DASHSCOPE_API_KEY (or QWEN_API_KEY) not found in environment. "
             "Please set it in .env file or as environment variable.",
             file=sys.stderr,
         )

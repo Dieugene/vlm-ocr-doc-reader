@@ -1,6 +1,6 @@
 # vlm-ocr-doc-reader
 
-Python package for document processing via Vision Language Models and OCR. VLM reads structure and text; OCR extracts identifiers and numbers with precision.
+Python package for document processing via a Vision Language Model and OCR. VLM (Qwen `qwen3-vl-flash` via DashScope) reads structure and text; OCR (Qwen `qwen-vl-plus`) extracts identifiers and numbers with precision. Both use a single DashScope API key.
 
 ## Installation
 
@@ -12,10 +12,11 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-API keys via `.env` at project root:
+API keys via `.env` at project root (both VLM and OCR use the same DashScope key):
 
 ```
-GEMINI_API_KEY=...
+DASHSCOPE_API_KEY=...
+# or equivalent alias
 QWEN_API_KEY=...
 ```
 
@@ -81,8 +82,8 @@ Details — [overview.md](00_docs/architecture/overview.md), [ADR 001](00_docs/a
 
 ## Limitations
 
-- VLM: Gemini only; OCR: Qwen only.
-- `verify()` is an interface stub without strategy.
+- VLM: Qwen (`qwen3-vl-flash`) only; OCR: Qwen (`qwen-vl-plus`) only. `BaseVLMClient`/`BaseOCRClient` leave room for other providers, but no other implementations exist.
+- `verify()` is an interface stub — no majority-voting strategy.
 - Rendering DPI is hardcoded to 150.
 - `DocumentData.tables` is always empty.
 
