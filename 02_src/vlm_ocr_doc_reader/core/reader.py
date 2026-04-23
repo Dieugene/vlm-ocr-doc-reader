@@ -2,8 +2,9 @@
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from .state import (
     StateManager,
@@ -212,13 +213,52 @@ class DocumentReader:
             f"batch_size={batch_size}"
         )
 
-    def resolve(self, pages: Optional[Iterable[int]] = None) -> None:
-        """Level 1: OCR resolve without VLM. Page-based batching, partial failure handling."""
+    @staticmethod
+    def _default_chunk_size() -> int:
+        """Default OCR chunk size: env OCR_CHUNK_SIZE or 5."""
+        raw = os.getenv("OCR_CHUNK_SIZE", "5").strip()
+        try:
+            value = int(raw)
+            return value if value > 0 else 5
+        except ValueError:
+            return 5
+
+    @staticmethod
+    def _default_max_workers() -> int:
+        """Default OCR concurrency: env OCR_MAX_WORKERS or 5."""
+        raw = os.getenv("OCR_MAX_WORKERS", "5").strip()
+        try:
+            value = int(raw)
+            return value if value > 0 else 5
+        except ValueError:
+            return 5
+
+    def resolve(
+        self,
+        pages: Optional[Iterable[int]] = None,
+        chunk_size: Optional[int] = None,
+        max_workers: Optional[int] = None,
+    ) -> None:
+        """Level 1: OCR resolve without VLM. Multi-question per request, parallel chunks.
+
+        Pending entities are grouped by page and split into chunks of
+        `chunk_size` prompts. Each chunk is one OCR call (image + N tasks).
+        Chunks across all pages execute in a thread pool of `max_workers`
+        concurrent workers.
+
+        Defaults: chunk_size from env OCR_CHUNK_SIZE or 5;
+                  max_workers from env OCR_MAX_WORKERS or 5.
+        """
         ocr_tool = getattr(self._processor, "ocr_tool", None)
         if ocr_tool is None:
             logger.warning(
-                "resolve: OCR tool not available (QWEN_API_KEY not set). Skipping."
+                "resolve: OCR tool not available (DASHSCOPE_API_KEY not set). Skipping."
             )
+            return
+
+        ocr_client = getattr(ocr_tool, "ocr_client", None)
+        if ocr_client is None or not hasattr(ocr_client, "extract_batch"):
+            logger.warning("resolve: OCR client missing extract_batch, skipping")
             return
 
         page_list = self._normalize_pages(pages)
@@ -229,63 +269,108 @@ class DocumentReader:
             logger.info(f"resolve: no pending entities for pages {page_list}")
             return
 
-        self._resolve_entities(pending, ocr_tool)
+        effective_chunk = chunk_size if chunk_size and chunk_size > 0 else self._default_chunk_size()
+        effective_workers = max_workers if max_workers and max_workers > 0 else self._default_max_workers()
+        self._resolve_entities(pending, ocr_client, effective_chunk, effective_workers)
 
     def _resolve_entities(
-        self, pending: List[OCRRegistryEntry], ocr_tool: Any
+        self,
+        pending: List[OCRRegistryEntry],
+        ocr_client: Any,
+        chunk_size: int,
+        max_workers: int,
     ) -> None:
-        """Execute OCR for pending entities, grouped by page. Partial failure safe."""
+        """Execute OCR for pending entities in parallel chunks across pages."""
         from .ocr_client import QwenClientError
 
         by_page = group_registry_by_page(pending)
         page_nums = sorted(by_page.keys())
 
+        # Build all (page_num, image, chunk) tasks across all pages
+        tasks: List[Tuple[int, bytes, List[OCRRegistryEntry]]] = []
         for page_num in page_nums:
             entries = by_page[page_num]
             image = self._state_manager.load_page(page_num)
             if image is None:
                 logger.warning(f"resolve: page {page_num} not found, skipping")
                 continue
+            for start in range(0, len(entries), chunk_size):
+                tasks.append((page_num, image, entries[start:start + chunk_size]))
 
-            updated: List[OCRRegistryEntry] = []
-            any_success = False
+        if not tasks:
+            logger.info("resolve: nothing to do after task assembly")
+            return
 
-            for entry in entries:
-                try:
-                    result = ocr_tool.execute(entry.page_num, entry.prompt)
-                except QwenClientError as exc:
+        def run_one(
+            task: Tuple[int, bytes, List[OCRRegistryEntry]],
+        ) -> Tuple[int, List[OCRRegistryEntry], Optional[List[Dict[str, Any]]], Optional[str]]:
+            page_num, image, chunk = task
+            prompts = [e.prompt for e in chunk]
+            try:
+                results = ocr_client.extract_batch(image, prompts, page_num)
+                return page_num, chunk, results, None
+            except QwenClientError as exc:
+                return page_num, chunk, None, f"QwenClientError: {exc}"
+            except Exception as exc:
+                return page_num, chunk, None, f"{type(exc).__name__}: {exc}"
+
+        # Group results by page so set_page_resolution fires once per page
+        page_updates: Dict[int, List[OCRRegistryEntry]] = {p: [] for p in page_nums}
+        page_any_success: Dict[int, bool] = {p: False for p in page_nums}
+        total_calls = 0
+
+        if max_workers <= 1:
+            iter_results = (run_one(t) for t in tasks)
+        else:
+            pool = ThreadPoolExecutor(max_workers=max_workers)
+            iter_results = pool.map(run_one, tasks)
+
+        try:
+            for page_num, chunk, results, err in iter_results:
+                total_calls += 1
+                if err is not None:
                     logger.warning(
-                        f"resolve: OCR error for entity {entry.entity_id} "
-                        f"page={page_num}: {exc}"
+                        f"resolve: OCR error for page={page_num} "
+                        f"chunk_size={len(chunk)}: {err}"
                     )
                     continue
-                except Exception as exc:
-                    logger.warning(
-                        f"resolve: unexpected error for entity {entry.entity_id} "
-                        f"page={page_num}: {exc}"
-                    )
-                    continue
 
-                status = result.get("status", "error")
-                if status in ("ok", "no_data"):
-                    value = result.get("value", "") or ""
-                    context = result.get("context") or result.get("explanation") or ""
-                    updated.append(
-                        apply_ocr_result(entry, value, context, resolution=1)
-                    )
-                    any_success = True
-                else:
+                if len(results) != len(chunk):
                     logger.warning(
-                        f"resolve: status={status} for entity {entry.entity_id} "
-                        f"page={page_num}, keeping pending"
+                        f"resolve: result count mismatch for page={page_num} "
+                        f"(got {len(results)}, expected {len(chunk)})"
                     )
 
+                for entry, result in zip(chunk, results):
+                    status = result.get("status", "error")
+                    if status in ("ok", "no_data"):
+                        value = result.get("value", "") or ""
+                        context = result.get("context") or result.get("explanation") or ""
+                        page_updates[page_num].append(
+                            apply_ocr_result(entry, value, context, resolution=1)
+                        )
+                        page_any_success[page_num] = True
+                    else:
+                        logger.warning(
+                            f"resolve: status={status} for entity {entry.entity_id} "
+                            f"page={page_num}, keeping pending"
+                        )
+        finally:
+            if max_workers > 1:
+                pool.shutdown(wait=True)
+
+        # Persist per page (single state.json save per page)
+        for page_num in page_nums:
+            updated = page_updates.get(page_num) or []
             if updated:
                 self._state_manager.upsert_ocr_entries(updated)
-            if any_success:
+            if page_any_success.get(page_num):
                 self._state_manager.set_page_resolution(page_num, "resolved")
 
-        logger.info(f"resolve: processed {len(page_nums)} pages")
+        logger.info(
+            f"resolve: processed {len(page_nums)} pages in {total_calls} OCR calls "
+            f"(chunk_size={chunk_size}, max_workers={max_workers})"
+        )
 
     def verify(self, pages: Optional[Iterable[int]] = None) -> None:
         """Level 2 interface only. No majority-voting strategy in v0.2.0 (ADR-001).

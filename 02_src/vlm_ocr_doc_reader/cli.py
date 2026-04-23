@@ -173,7 +173,11 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     try:
         pages = parse_pages_arg(args.pages) if args.pages else None
         reader = DocumentReader.open(args.pdf_path, args.workspace)
-        reader.resolve(pages=pages)
+        reader.resolve(
+            pages=pages,
+            chunk_size=args.chunk_size,
+            max_workers=args.max_workers,
+        )
         logger.info("resolve completed")
         print("Resolve completed.")
         return 0
@@ -292,6 +296,18 @@ Examples:
     p_resolve = subparsers.add_parser("resolve", help="Level 1: OCR resolve from Registry")
     _add_common_args(p_resolve)
     _add_pages_arg(p_resolve)
+    p_resolve.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="OCR chunk size: number of prompts per request (default: env OCR_CHUNK_SIZE or 5)",
+    )
+    p_resolve.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Parallel OCR workers (default: env OCR_MAX_WORKERS or 5)",
+    )
     p_resolve.set_defaults(func=cmd_resolve)
 
     # verify

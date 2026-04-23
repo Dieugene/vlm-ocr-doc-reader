@@ -12,7 +12,7 @@ Python-пакет для обработки документов через VLM 
 | 1 | `resolve` | OCR | Выполняет OCR по записям Registry для страниц |
 | 2 | `verify` | — | Интерфейс есть, стратегия majority voting не реализована |
 
-`resolve` не вызывает VLM: `DocumentReader` сам итерирует Registry и обращается к OCR-клиенту напрямую. Батчинг по странице — внутри `resolve`.
+`resolve` не вызывает VLM: `DocumentReader` группирует Registry по страницам, для каждой страницы отправляет OCR одну картинку + список вопросов (multi-question, размер чанка задаётся параметром `chunk_size` или env `OCR_CHUNK_SIZE`, по умолчанию 5).
 
 Обоснование выбора — см. [ADR 001](decision_001_resolution_levels.md).
 
@@ -92,7 +92,7 @@ from vlm_ocr_doc_reader import DocumentReader
 
 reader = DocumentReader.open(pdf_path, workspace=None)  # workspace=None → memory mode
 reader.scan(pages=None)                                  # None → все страницы
-reader.resolve(pages=None)
+reader.resolve(pages=None, chunk_size=None)             # multi-question OCR; chunk_size override
 reader.verify(pages=None)                                # stub
 reader.page_status()                                     # {page_num: "scan"|"resolved"|"verified"}
 reader.pending_entities(page=None)                       # список OCRRegistryEntry с resolution < 1
