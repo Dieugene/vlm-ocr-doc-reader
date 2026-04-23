@@ -272,6 +272,9 @@ class QwenOCRClient(BaseOCRClient):
                 resp = requests.post(
                     url, json=payload, headers=headers, timeout=self.config.timeout_sec
                 )
+                # DashScope responds with UTF-8 but without `charset` in Content-Type;
+                # requests then falls back to ISO-8859-1 per RFC 2616 and garbles Cyrillic.
+                resp.encoding = "utf-8"
                 latency_ms = int((time.time() - start_time) * 1000)
                 status = resp.status_code
 

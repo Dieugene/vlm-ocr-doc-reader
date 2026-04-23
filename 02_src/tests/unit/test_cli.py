@@ -192,7 +192,9 @@ class TestMainSubcommands:
 
         assert result == 0
         mock_reader_class.open.assert_called_once_with(mock_pdf_path, ws)
-        mock_reader.resolve.assert_called_once_with(pages=[1, 3, 4, 5])
+        mock_reader.resolve.assert_called_once_with(
+            pages=[1, 3, 4, 5], chunk_size=None, max_workers=None
+        )
 
     @patch("vlm_ocr_doc_reader.cli.load_dotenv")
     @patch("vlm_ocr_doc_reader.cli.DocumentReader")

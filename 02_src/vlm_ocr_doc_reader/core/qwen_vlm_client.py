@@ -61,6 +61,9 @@ class QwenVLMClient(BaseVLMClient):
                     json=payload,
                     timeout=self.config.timeout_sec,
                 )
+                # DashScope returns UTF-8 without `charset` in Content-Type;
+                # without this, requests falls back to ISO-8859-1 and garbles Cyrillic.
+                resp.encoding = "utf-8"
                 status = resp.status_code
                 is_retryable = status == 429 or (500 <= status < 600)
 

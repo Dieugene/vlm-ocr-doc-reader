@@ -10,6 +10,7 @@ from vlm_ocr_doc_reader.core.ocr_client import (
     OCRConfig,
     QwenClientError,
     QwenOCRClient,
+    parse_qwen_text_response,
 )
 
 
@@ -18,7 +19,7 @@ def ocr_config():
     """Create test OCR config."""
     return OCRConfig(
         api_key="test_api_key",
-        model="qwen-vl-plus",
+        model="qwen-vl-ocr-2025-11-20",
         timeout_sec=60,
         max_retries=3,
         backoff_base=1.5,
@@ -62,27 +63,29 @@ class TestOCRConfig:
     def test_config_defaults(self):
         """Test config default values."""
         config = OCRConfig(api_key="test_key")
-        assert config.model == "qwen-vl-plus"
+        assert config.model == "qwen-vl-ocr-2025-11-20"
         assert config.timeout_sec == 60
         assert config.max_retries == 3
         assert config.backoff_base == 1.5
 
-    @patch.dict("os.environ", {"QWEN_API_KEY": "env_key"})
-    def test_config_from_env(self):
-        """Test config loads API key from environment."""
+    def test_config_from_env(self, monkeypatch):
+        """Test config loads API key from environment (DASHSCOPE first, QWEN fallback)."""
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        monkeypatch.setenv("QWEN_API_KEY", "env_key")
         config = OCRConfig()
         assert config.api_key == "env_key"
 
-    @patch.dict("os.environ", {"QWEN_API_KEY": "", "DASHSCOPE_API_KEY": "dashscope_key"})
-    def test_config_dashscope_fallback(self):
-        """Test config uses DASHSCOPE_API_KEY as fallback when QWEN_API_KEY not set."""
+    def test_config_dashscope_priority(self, monkeypatch):
+        """DASHSCOPE_API_KEY wins when both are set."""
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope_key")
+        monkeypatch.setenv("QWEN_API_KEY", "qwen_key")
         config = OCRConfig()
         assert config.api_key == "dashscope_key"
 
     def test_config_missing_api_key(self):
         """Test config raises error when API key not set."""
         with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="QWEN_API_KEY or DASHSCOPE_API_KEY"):
+            with pytest.raises(ValueError, match="DASHSCOPE_API_KEY or QWEN_API_KEY"):
                 OCRConfig()
 
 
@@ -106,36 +109,36 @@ class TestQwenOCRClient:
         except Exception:
             pytest.fail("Invalid base64 string")
 
-    def test_parse_qwen_response_success(self, qwen_client):
+    def test_parse_qwen_response_success(self):
         """Test parsing successful Qwen response."""
         response_text = """
         ЗНАЧЕНИЕ: 22006042705
         КОНТЕКСТ: Руководитель аудита (ОРНЗ 22006042705)
         ПОЯСНЕНИЕ: Нашёл в центральной части страницы
         """
-        result = qwen_client._parse_qwen_response(response_text)
+        result = parse_qwen_text_response(response_text)
 
         assert result["status"] == "ok"
         assert result["value"] == "22006042705"
         assert "ОРНЗ 22006042705" in result["context"]
         assert "Нашёл" in result["explanation"]
 
-    def test_parse_qwen_response_no_data(self, qwen_client):
+    def test_parse_qwen_response_no_data(self):
         """Test parsing Qwen response with no data."""
         response_text = """
         ЗНАЧЕНИЕ: НЕТ
         КОНТЕКСТ: -
         ПОЯСНЕНИЕ: Искал номер, но не нашёл
         """
-        result = qwen_client._parse_qwen_response(response_text)
+        result = parse_qwen_text_response(response_text)
 
         assert result["status"] == "no_data"
         assert result["value"] == ""
 
-    def test_parse_qwen_response_fallback(self, qwen_client):
+    def test_parse_qwen_response_fallback(self):
         """Test parsing fallback when format is invalid."""
         response_text = "1234567890123"  # Just digits (13 digits for OGRN)
-        result = qwen_client._parse_qwen_response(response_text)
+        result = parse_qwen_text_response(response_text)
 
         assert result["status"] == "ok"
         assert result["value"] == "1234567890123"
@@ -163,6 +166,48 @@ class TestQwenOCRClient:
         assert result["status"] == "ok"
         assert result["value"] == "22006042705"
         assert mock_post.called
+
+    def test_extract_utf8_roundtrip_without_charset(self, qwen_client, sample_image):
+        """Regression: DashScope responds UTF-8 without charset in Content-Type;
+        requests falls back to ISO-8859-1 and garbles Cyrillic unless we set
+        resp.encoding='utf-8' explicitly before calling .json()/.text.
+        """
+        import json as _json
+
+        cyrillic_value = "Центральный Банк РФ"
+        body = _json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                f"ЗНАЧЕНИЕ: {cyrillic_value}\n"
+                                "КОНТЕКСТ: Найдено в заголовке\n"
+                                "ПОЯСНЕНИЕ: Ок"
+                            )
+                        }
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        # Real Response so requests' encoding logic runs (no charset → ISO-8859-1 fallback).
+        real_resp = requests.Response()
+        real_resp.status_code = 200
+        real_resp._content = body
+        real_resp.headers["Content-Type"] = "application/json"  # no charset
+
+        with patch(
+            "vlm_ocr_doc_reader.core.ocr_client.requests.post",
+            return_value=real_resp,
+        ):
+            result = qwen_client.extract(sample_image, "найди банк", 1)
+
+        assert result["status"] == "ok"
+        assert result["value"] == cyrillic_value
+        assert "�" not in result["value"]
+        assert "�" not in (result.get("context") or "")
 
     @patch("vlm_ocr_doc_reader.core.ocr_client.requests.post")
     def test_extract_retry_on_429(self, mock_post, qwen_client, sample_image):
