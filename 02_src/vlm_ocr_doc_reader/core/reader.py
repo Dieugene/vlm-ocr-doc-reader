@@ -15,6 +15,7 @@ from .state import (
     apply_ocr_result,
 )
 from .processor import DocumentProcessor
+from .voting import VoteSample, majority_vote
 from ..schemas.config import ProcessorConfig
 from ..schemas.document import DocumentData
 from ..operations.scan import (
@@ -273,33 +274,45 @@ class DocumentReader:
         effective_workers = max_workers if max_workers and max_workers > 0 else self._default_max_workers()
         self._resolve_entities(pending, ocr_client, effective_chunk, effective_workers)
 
-    def _resolve_entities(
+    def _ocr_pass(
         self,
-        pending: List[OCRRegistryEntry],
+        entries: List[OCRRegistryEntry],
         ocr_client: Any,
         chunk_size: int,
         max_workers: int,
-    ) -> None:
-        """Execute OCR for pending entities in parallel chunks across pages."""
+        log_prefix: str = "ocr_pass",
+    ) -> Dict[str, Dict[str, Any]]:
+        """Run one OCR pass over entries, grouped by page in parallel chunks.
+
+        Does NOT mutate state. Returns raw results keyed by entity_id:
+          {entity_id: {"value": str, "context": Optional[str], "status": str}}
+
+        Status values:
+          - "ok" / "no_data": OCR returned a usable response (voting-valid)
+          - "error": chunk call failed, result missing, or entity-level status
+                     from client was not ok/no_data
+        """
         from .ocr_client import QwenClientError
 
-        by_page = group_registry_by_page(pending)
+        by_page = group_registry_by_page(entries)
         page_nums = sorted(by_page.keys())
 
-        # Build all (page_num, image, chunk) tasks across all pages
         tasks: List[Tuple[int, bytes, List[OCRRegistryEntry]]] = []
         for page_num in page_nums:
-            entries = by_page[page_num]
+            page_entries = by_page[page_num]
             image = self._state_manager.load_page(page_num)
             if image is None:
-                logger.warning(f"resolve: page {page_num} not found, skipping")
+                logger.warning(f"{log_prefix}: page {page_num} not found, skipping")
                 continue
-            for start in range(0, len(entries), chunk_size):
-                tasks.append((page_num, image, entries[start:start + chunk_size]))
+            for start in range(0, len(page_entries), chunk_size):
+                tasks.append((page_num, image, page_entries[start:start + chunk_size]))
 
+        results: Dict[str, Dict[str, Any]] = {
+            e.entity_id: {"value": "", "context": None, "status": "error"}
+            for e in entries
+        }
         if not tasks:
-            logger.info("resolve: nothing to do after task assembly")
-            return
+            return results
 
         def run_one(
             task: Tuple[int, bytes, List[OCRRegistryEntry]],
@@ -307,83 +320,216 @@ class DocumentReader:
             page_num, image, chunk = task
             prompts = [e.prompt for e in chunk]
             try:
-                results = ocr_client.extract_batch(image, prompts, page_num)
-                return page_num, chunk, results, None
+                out = ocr_client.extract_batch(image, prompts, page_num)
+                return page_num, chunk, out, None
             except QwenClientError as exc:
                 return page_num, chunk, None, f"QwenClientError: {exc}"
             except Exception as exc:
                 return page_num, chunk, None, f"{type(exc).__name__}: {exc}"
 
-        # Group results by page so set_page_resolution fires once per page
-        page_updates: Dict[int, List[OCRRegistryEntry]] = {p: [] for p in page_nums}
-        page_any_success: Dict[int, bool] = {p: False for p in page_nums}
-        total_calls = 0
-
         if max_workers <= 1:
             iter_results = (run_one(t) for t in tasks)
+            pool = None
         else:
             pool = ThreadPoolExecutor(max_workers=max_workers)
             iter_results = pool.map(run_one, tasks)
 
+        total_calls = 0
         try:
-            for page_num, chunk, results, err in iter_results:
+            for page_num, chunk, chunk_results, err in iter_results:
                 total_calls += 1
                 if err is not None:
                     logger.warning(
-                        f"resolve: OCR error for page={page_num} "
+                        f"{log_prefix}: OCR error for page={page_num} "
                         f"chunk_size={len(chunk)}: {err}"
                     )
                     continue
 
-                if len(results) != len(chunk):
+                if len(chunk_results) != len(chunk):
                     logger.warning(
-                        f"resolve: result count mismatch for page={page_num} "
-                        f"(got {len(results)}, expected {len(chunk)})"
+                        f"{log_prefix}: result count mismatch for page={page_num} "
+                        f"(got {len(chunk_results)}, expected {len(chunk)})"
                     )
 
-                for entry, result in zip(chunk, results):
-                    status = result.get("status", "error")
+                for entry, res in zip(chunk, chunk_results):
+                    status = res.get("status", "error")
+                    value = res.get("value", "") or ""
+                    context = res.get("context") or res.get("explanation") or ""
                     if status in ("ok", "no_data"):
-                        value = result.get("value", "") or ""
-                        context = result.get("context") or result.get("explanation") or ""
-                        page_updates[page_num].append(
-                            apply_ocr_result(entry, value, context, resolution=1)
-                        )
-                        page_any_success[page_num] = True
+                        results[entry.entity_id] = {
+                            "value": value,
+                            "context": context,
+                            "status": status,
+                        }
                     else:
                         logger.warning(
-                            f"resolve: status={status} for entity {entry.entity_id} "
-                            f"page={page_num}, keeping pending"
+                            f"{log_prefix}: status={status} for entity {entry.entity_id} "
+                            f"page={page_num}"
                         )
         finally:
-            if max_workers > 1:
+            if pool is not None:
                 pool.shutdown(wait=True)
 
-        # Persist per page (single state.json save per page)
-        for page_num in page_nums:
-            updated = page_updates.get(page_num) or []
-            if updated:
-                self._state_manager.upsert_ocr_entries(updated)
-            if page_any_success.get(page_num):
-                self._state_manager.set_page_resolution(page_num, "resolved")
-
         logger.info(
-            f"resolve: processed {len(page_nums)} pages in {total_calls} OCR calls "
+            f"{log_prefix}: processed {len(page_nums)} pages in {total_calls} OCR calls "
             f"(chunk_size={chunk_size}, max_workers={max_workers})"
         )
+        return results
 
-    def verify(self, pages: Optional[Iterable[int]] = None) -> None:
-        """Level 2 interface only. No majority-voting strategy in v0.2.0 (ADR-001).
+    def _resolve_entities(
+        self,
+        pending: List[OCRRegistryEntry],
+        ocr_client: Any,
+        chunk_size: int,
+        max_workers: int,
+    ) -> None:
+        """Execute OCR for pending entities via _ocr_pass and persist."""
+        results = self._ocr_pass(
+            pending, ocr_client, chunk_size, max_workers, log_prefix="resolve"
+        )
 
-        Accepts pages, normalizes range. Empty/invalid range: early exit, state unchanged.
-        TODO: Majority voting / confidence scoring deferred until experiments (ADR-001, Task 015).
+        by_page = group_registry_by_page(pending)
+        for page_num, page_entries in sorted(by_page.items()):
+            updated: List[OCRRegistryEntry] = []
+            any_success = False
+            for entry in page_entries:
+                res = results.get(entry.entity_id)
+                if res is None or res["status"] not in ("ok", "no_data"):
+                    continue
+                updated.append(
+                    apply_ocr_result(
+                        entry, res["value"], res["context"], resolution=1
+                    )
+                )
+                any_success = True
+            if updated:
+                self._state_manager.upsert_ocr_entries(updated)
+            if any_success:
+                self._state_manager.set_page_resolution(page_num, "resolved")
+
+    @staticmethod
+    def _default_verify_axes() -> List[int]:
+        """Default verify axes (chunk_size values): env OCR_VERIFY_AXES or '1,3,5'."""
+        raw = os.getenv("OCR_VERIFY_AXES", "1,3,5").strip()
+        axes: List[int] = []
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                value = int(token)
+                if value > 0:
+                    axes.append(value)
+            except ValueError:
+                continue
+        return axes or [1, 3, 5]
+
+    def verify(
+        self,
+        pages: Optional[Iterable[int]] = None,
+        axes: Optional[List[int]] = None,
+        max_workers: Optional[int] = None,
+    ) -> None:
+        """Level 2: Majority voting via chunk_size variation (ADR-002).
+
+        For each entity on the target pages, runs len(axes) independent OCR
+        passes (one per chunk_size) and combines them via majority_vote:
+          - value/context — from first sample in the winning group
+          - confidence    — "k/N" (N = number of non-error samples)
+          - verified      — True iff unanimous AND no errors
+          - resolution    — 2
+
+        Defaults: axes from env OCR_VERIFY_AXES or [1, 3, 5];
+                  max_workers from env OCR_MAX_WORKERS or 5.
         """
+        ocr_tool = getattr(self._processor, "ocr_tool", None)
+        if ocr_tool is None:
+            logger.warning(
+                "verify: OCR tool not available (DASHSCOPE_API_KEY not set). Skipping."
+            )
+            return
+
+        ocr_client = getattr(ocr_tool, "ocr_client", None)
+        if ocr_client is None or not hasattr(ocr_client, "extract_batch"):
+            logger.warning("verify: OCR client missing extract_batch, skipping")
+            return
+
         page_list = self._normalize_pages(pages)
         if not page_list:
             logger.warning("verify: no pages to process (empty or invalid range)")
             return
-        # Stub: no OCR calls, no state changes. Strategy deferred (ADR-001).
-        logger.info(f"verify: pages {page_list} (interface stub, voting strategy deferred)")
+
+        effective_axes = [a for a in (axes or []) if a and a > 0] or self._default_verify_axes()
+        effective_workers = max_workers if max_workers and max_workers > 0 else self._default_max_workers()
+
+        registry = self._state_manager.load_ocr_registry()
+        targets = [e for e in registry if e.page_num in page_list]
+        if not targets:
+            logger.info(f"verify: no registry entries for pages {page_list}")
+            return
+
+        logger.info(
+            f"verify: {len(targets)} entries across {len(set(e.page_num for e in targets))} "
+            f"pages, axes={effective_axes}, workers={effective_workers}"
+        )
+
+        # Run N independent OCR passes, one per axis
+        runs: List[Dict[str, Dict[str, Any]]] = []
+        for axis in effective_axes:
+            results = self._ocr_pass(
+                targets,
+                ocr_client,
+                chunk_size=axis,
+                max_workers=effective_workers,
+                log_prefix=f"verify[chunk={axis}]",
+            )
+            runs.append(results)
+
+        # Majority vote per entity
+        updated_entries: List[OCRRegistryEntry] = []
+        page_any_success: Dict[int, bool] = {}
+        for entry in targets:
+            samples = [
+                VoteSample(
+                    value=run.get(entry.entity_id, {}).get("value"),
+                    context=run.get(entry.entity_id, {}).get("context"),
+                    status=run.get(entry.entity_id, {}).get("status", "error"),
+                )
+                for run in runs
+            ]
+            value, context, confidence, verified = majority_vote(samples)
+            # All errors → keep entry unchanged, do not mark verified
+            if confidence.startswith("0/"):
+                logger.warning(
+                    f"verify: all {len(samples)} samples failed for {entry.entity_id}, "
+                    f"keeping previous state"
+                )
+                continue
+            updated_entries.append(
+                OCRRegistryEntry(
+                    page_num=entry.page_num,
+                    entity_id=entry.entity_id,
+                    prompt=entry.prompt,
+                    resolution=2,
+                    value=value,
+                    context=context,
+                    verified=verified,
+                    confidence=confidence,
+                )
+            )
+            page_any_success[entry.page_num] = True
+
+        if updated_entries:
+            self._state_manager.upsert_ocr_entries(updated_entries)
+        for page_num, ok in page_any_success.items():
+            if ok:
+                self._state_manager.set_page_resolution(page_num, "verified")
+
+        unanimous = sum(1 for e in updated_entries if e.verified)
+        logger.info(
+            f"verify: updated {len(updated_entries)} entries, "
+            f"unanimous={unanimous}/{len(updated_entries)}"
+        )
 
     def page_status(self) -> Dict[int, PageResolution]:
         """Return page resolution status from StateManager."""

@@ -86,6 +86,28 @@ def parse_pages_arg(raw: Optional[str]) -> Optional[List[int]]:
     return sorted(result)
 
 
+def parse_axes_arg(raw: Optional[str]) -> Optional[List[int]]:
+    """Parse --axes string like '1,3,5' into list of positive ints.
+
+    Returns None if raw is None/empty (reader falls back to env/default).
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    result: List[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError:
+            raise ValueError(f"Invalid axis value: {token!r}")
+        if value <= 0:
+            raise ValueError(f"Axis must be positive: {value}")
+        result.append(value)
+    return result or None
+
+
 def setup_logging(log_level: str) -> None:
     """Setup logging to console (UTF-8 after ensure_utf8_stdio)."""
     level = getattr(logging, log_level.upper(), logging.INFO)
@@ -190,7 +212,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Level 2: Verify (stub for 015)."""
+    """Level 2: Majority voting OCR verify (ADR-002)."""
     _check_api_key()
     _check_pdf_path(args.pdf_path)
 
@@ -199,10 +221,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     try:
         pages = parse_pages_arg(args.pages) if args.pages else None
+        axes = parse_axes_arg(args.axes) if args.axes else None
         reader = DocumentReader.open(args.pdf_path, args.workspace)
-        reader.verify(pages=pages)
-        logger.info("verify completed (stub)")
-        print("Verify completed (strategy stub for 015).")
+        reader.verify(
+            pages=pages,
+            axes=axes,
+            max_workers=args.max_workers,
+        )
+        logger.info("verify completed")
+        print("Verify completed.")
         return 0
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -311,9 +338,24 @@ Examples:
     p_resolve.set_defaults(func=cmd_resolve)
 
     # verify
-    p_verify = subparsers.add_parser("verify", help="Level 2: Verify (stub)")
+    p_verify = subparsers.add_parser(
+        "verify",
+        help="Level 2: Majority voting OCR (ADR-002)",
+    )
     _add_common_args(p_verify)
     _add_pages_arg(p_verify)
+    p_verify.add_argument(
+        "--axes",
+        type=str,
+        default=None,
+        help="Comma-separated chunk_size values for voting (default: env OCR_VERIFY_AXES or 1,3,5)",
+    )
+    p_verify.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Parallel OCR workers within each axis (default: env OCR_MAX_WORKERS or 5)",
+    )
     p_verify.set_defaults(func=cmd_verify)
 
     # full-description

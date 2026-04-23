@@ -1,6 +1,6 @@
 # Архитектура
 
-Python-пакет для обработки документов через VLM и OCR — оба провайдера сейчас Qwen через DashScope (`qwen3-vl-flash` для чтения структуры, `qwen-vl-plus` для точечного OCR). Ключевой приём — разделение по уровням детальности (Resolution Levels): VLM быстро читает структуру и текст, OCR точечно извлекает критичные идентификаторы.
+Python-пакет для обработки документов через VLM и OCR — оба провайдера сейчас Qwen через DashScope (`qwen3-vl-flash` для чтения структуры, `qwen-vl-ocr-2025-11-20` для точечного OCR). Ключевой приём — разделение по уровням детальности (Resolution Levels): VLM быстро читает структуру и текст, OCR точечно извлекает критичные идентификаторы, `verify` голосует между несколькими прогонами для confidence-оценки.
 
 ## Resolution Levels
 
@@ -10,11 +10,13 @@ Python-пакет для обработки документов через VLM 
 |-------|---------|--------------|------------|
 | 0 | `scan` | VLM | Читает страницы, возвращает текст + структуру + OCR Registry (что извлекать точно) |
 | 1 | `resolve` | OCR | Выполняет OCR по записям Registry для страниц |
-| 2 | `verify` | — | Интерфейс есть, стратегия majority voting не реализована |
+| 2 | `verify` | OCR | N независимых OCR-прогонов с разным `chunk_size`, majority voting, `confidence="k/N"` |
 
 `resolve` не вызывает VLM: `DocumentReader` группирует Registry по страницам, для каждой страницы отправляет OCR одну картинку + список вопросов (multi-question, размер чанка задаётся параметром `chunk_size` или env `OCR_CHUNK_SIZE`, по умолчанию 5).
 
-Обоснование выбора — см. [ADR 001](decision_001_resolution_levels.md).
+`verify` (ADR-002) выполняет `len(axes)` независимых OCR-проходов с разным `chunk_size` (дефолт `[1, 3, 5]` из env `OCR_VERIFY_AXES`) и голосует по нормализованным значениям: `value` — оригинал от первого прогона в winning group, `confidence = "k/N"`, `verified = True` только при unanimous (все оси совпали, без ошибок), `resolution = 2`. Ошибочные прогоны не голосуют и уменьшают знаменатель.
+
+Обоснование выбора уровней — см. [ADR 001](decision_001_resolution_levels.md); стратегия verify — [ADR 002](decision_002_verify.md).
 
 ## OCR Registry
 
@@ -65,6 +67,7 @@ vlm_ocr_doc_reader/
 │   ├── qwen_vlm_client.py   QwenVLMClient (DashScope OpenAI-compatible endpoint)
 │   ├── ocr_tool.py          OCRTool — tool для VLM agent (ask_ocr)
 │   ├── ocr_client.py        QwenOCRClient
+│   ├── voting.py            majority_vote + нормализация (Level 2 verify)
 │   └── state.py             StateManager + WorkspaceStorage + OCRRegistryEntry
 ├── operations/
 │   ├── base.py              BaseOperation
@@ -91,9 +94,9 @@ vlm_ocr_doc_reader/
 from vlm_ocr_doc_reader import DocumentReader
 
 reader = DocumentReader.open(pdf_path, workspace=None)  # workspace=None → memory mode
-reader.scan(pages=None)                                  # None → все страницы
-reader.resolve(pages=None, chunk_size=None)             # multi-question OCR; chunk_size override
-reader.verify(pages=None)                                # stub
+reader.scan(pages=None)                                                   # None → все страницы
+reader.resolve(pages=None, chunk_size=None, max_workers=None)             # multi-question OCR; chunk_size/workers override
+reader.verify(pages=None, axes=None, max_workers=None)                    # majority voting по chunk_size (ADR-002)
 reader.page_status()                                     # {page_num: "scan"|"resolved"|"verified"}
 reader.pending_entities(page=None)                       # список OCRRegistryEntry с resolution < 1
 reader.get_document_data() -> DocumentData
@@ -114,8 +117,8 @@ data = FullDescriptionOperation(processor).execute()
 
 ## Известные ограничения
 
-- VLM и OCR: только Qwen (`qwen3-vl-flash` и `qwen-vl-plus` соответственно), оба через DashScope и единый API-ключ. `BaseVLMClient`/`BaseOCRClient` оставляют место для других провайдеров, но реализаций нет.
-- `verify()` не реализует стратегию — лишь нормализует диапазон страниц и логирует.
+- VLM и OCR: только Qwen (`qwen3-vl-flash` и `qwen-vl-ocr-2025-11-20` соответственно), оба через DashScope и единый API-ключ. `BaseVLMClient`/`BaseOCRClient` оставляют место для других провайдеров, но реализаций нет.
+- `verify()` варьирует единственную ось — `chunk_size`. Ортогональные оси (DPI, температура, вторая модель) не реализованы.
 - DPI рендеринга жёстко 150 (`render_dpi` в `ProcessorConfig`, не используется как переменная через CLI).
 - `DocumentData.tables` всегда пуст.
 - `ClusterInfo` и `TriageResult` — зарезервированные типы, соответствующих операций нет.

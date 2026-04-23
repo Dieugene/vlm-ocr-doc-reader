@@ -17,6 +17,7 @@ Python-пакет (v0.1.0) для чтения документа через Vis
 - **Endpoint:** `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore, intl).
 - **API ключ:** один общий — `DASHSCOPE_API_KEY` (или alias `QWEN_API_KEY`) в `.env` корня подпроекта.
 - **Default resolve:** `chunk_size=5`, `max_workers=5` (env `OCR_CHUNK_SIZE`, `OCR_MAX_WORKERS`).
+- **Default verify axes:** `[1, 3, 5]` (env `OCR_VERIFY_AXES`), тот же `max_workers`.
 - **Default scan batch:** 2 страницы на VLM-запрос (env `VLM_SCAN_BATCH_SIZE`).
 - **Render DPI:** 150 захардкожен (`render_dpi` в `ProcessorConfig` есть, но через CLI не пробрасывается).
 
@@ -29,6 +30,7 @@ Python-пакет (v0.1.0) для чтения документа через Vis
 5. **Multi-question OCR.** В одном запросе картинка + список из N вопросов. Парсер `parse_multi_task_response` ищет блоки `[ЗАДАЧА N]` и для каждого вытаскивает значение/контекст/пояснение. Дефолт `chunk_size=5`. `extract()` оставлен как обёртка над `extract_batch([prompt])[0]` для обратной совместимости.
 6. **Параллельный resolve через `ThreadPoolExecutor`.** Все (page × chunk) задачи собираются в плоский список, идут в пул `max_workers`, результаты группируются по странице, persist пер страница. Дефолт 5 worker'ов.
 7. **Scan-промпт переписан с тремя жёсткими критериями для записей `ocr_registry`:** атомарность (одно значение в строку), конкретность («другой человек должен суметь найти, не видя страницу»), обоснованность (`context` 5–15 слов реального текста). Плюс явный image-to-page mapping в user-промпте каждого батча. Это убрало мусорные сущности и misattribution между страницами в batch.
+8. **Level 2 verify (ADR-002).** Варьируем единственную ось — `chunk_size` (дефолт `[1, 3, 5]`). Три независимых OCR-прохода, majority voting через `core/voting.py` (нормализация: trim + collapse spaces + lower, no_data как отдельный голос, errors не голосуют). Запись: `value` = оригинал первого прогона в winning group, `confidence = "k/N"` (N — только валидные голоса), `verified = True` iff unanimous AND no errors at all, `resolution = 2`. НЕ храним все samples в `state.json` — только итог. Не переиспользуем предыдущий `resolve`-value как голос: семантическая чистота. `_ocr_pass` выделен как общий low-level helper для resolve/verify.
 
 ## Эмпирика на тестовом документе (`03_data/test_document.pdf`, 8 стр.)
 
@@ -55,24 +57,23 @@ Grid `chunk_size × max_workers` (sequential vs parallel):
 
 ## Что сделано / не сделано
 
-**Сделано в текущей сессии (закоммичено `e9ae0f2`):**
-- Замена Gemini → Qwen (VLM + OCR, новая OCR-модель, удаление GeminiVLMClient + Gemini-mock тестов)
-- BaseVLMClient + VLMAgent на OpenAI-формат
-- SCAN_PROMPT_TEXT с критериями атомарности
-- E2E baseline 38 entries / 37 ok / 1 no_data
+**Сделано в текущей сессии:**
+- Замена Gemini → Qwen (VLM + OCR, новая OCR-модель, удаление GeminiVLMClient + Gemini-mock тестов).
+- BaseVLMClient + VLMAgent на OpenAI-формат.
+- SCAN_PROMPT_TEXT с критериями атомарности + image-to-page mapping в batch.
+- `extract_batch` + multi-question OCR парсер `[ЗАДАЧА N]`.
+- `DocumentReader.resolve(chunk_size, max_workers)` через ThreadPoolExecutor.
+- **Level 2 `verify` (ADR-002):** majority voting по axes (`chunk_size`), `core/voting.py`, `_ocr_pass` как общий low-level pass, `confidence="k/N"`, `verified=unanimous`.
+- CLI: `scan/resolve/verify` с полным набором флагов.
+- `scripts/ocr_chunk_grid.py` — grid эмпирика.
+- Доки: overview, backlog, ADR-001, ADR-002.
 
-**Сделано после `e9ae0f2`, ещё не закоммичено (этапы 3+4):**
-- `extract_batch(image, prompts, page_num)` в BaseOCRClient + Qwen реализация
-- Парсер `parse_multi_task_response` для блоков `[ЗАДАЧА N]`
-- `DocumentReader.resolve(chunk_size, max_workers)` через ThreadPoolExecutor
-- CLI: `--chunk-size`, `--max-workers`
-- env: `OCR_CHUNK_SIZE`, `OCR_MAX_WORKERS`
-- `scripts/ocr_chunk_grid.py` — grid `chunks × workers`
-- Обновления `overview.md` и `backlog.md`
+E2E verify на тестовом документе (8 стр, 32 entries, axes=[1,3,5], workers=5): 14 `3/3`, 16 `2/3`, 1 `1/3`, 1 `1/1` (URL на p8 падает на chunk≥3) — ~1 мин wall-time.
 
 **Открыто (`backlog.md`):**
-- **Этап 5: Level 2 `verify` с confidence scoring.** Самый назревший пункт. Решает прямо наблюдаемую проблему: при multi-question ~50% ответов отличаются от baseline, но мы не знаем какие правильные. Стратегия: для каждой сущности — N независимых прогонов по разным «осям» (chunk_size / DPI / temperature / модель), majority voting, поле `confidence` в `OCRRegistryEntry`. Заслуживает отдельного ADR (`decision_002_*`). Возможно частично «бесплатно» из grid-данных.
-- **Тест на больших документах** (30–100+ страниц, разные типы — регуляторные/финансовые/научные).
+- **Юникод-порча в сохранённых значениях.** В `state.json` есть `�` в кириллических значениях. Существует до этапа 5; подозрение на decode с `errors='replace'` в OCR-клиенте. Требует отдельной задачи.
+- **Тест на больших документах** (30–100+ страниц, разные типы — регуляторные/финансовые/научные). В частности — устойчивость verify при большом объёме.
+- **Дополнительные оси verify.** Сейчас ось только одна (`chunk_size`). Если эмпирика покажет, что ошибки коррелированы — добавить DPI/температуру/вторую модель.
 
 ## Структура и важные пути
 
@@ -111,7 +112,7 @@ Grid `chunk_size × max_workers` (sequential vs parallel):
 ## Workflow
 
 - **Виртуальное окружение:** `./venv/Scripts/python.exe`. Создан `python -m venv venv` из `C:\Python313`. Команды через `./venv/Scripts/vlm-ocr-reader.exe ...` или `./venv/Scripts/python.exe -m vlm_ocr_doc_reader.cli ...`.
-- **E2E:** `./venv/Scripts/vlm-ocr-reader.exe scan 03_data/test_document.pdf --workspace 04_logs/<run> --log-level INFO`, потом `... resolve ... --chunk-size 5 --max-workers 5`.
+- **E2E:** `./venv/Scripts/vlm-ocr-reader.exe scan 03_data/test_document.pdf --workspace 04_logs/<run> --log-level INFO`, потом `... resolve ... --chunk-size 5 --max-workers 5`, при желании `... verify ... --axes 1,3,5 --max-workers 5`.
 - **Grid:** `./venv/Scripts/python.exe scripts/ocr_chunk_grid.py --pdf 03_data/test_document.pdf --workspace 04_logs/<run> --chunks 1,5,8 --workers 1,5`.
 - **Unit-тесты:** `./venv/Scripts/python.exe -m pytest 02_src/tests/unit/ 02_src/tests/test_utils/ 02_src/tests/test_preprocessing/ 02_src/tests/test_core/test_state.py 02_src/tests/test_core/test_ocr_*.py -q`. Тесты с `pytestmark.skipif` пропускаются без API-ключа.
 
